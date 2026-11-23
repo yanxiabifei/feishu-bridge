@@ -15,7 +15,10 @@ function createStore({ file, log }) {
 
   return {
     load() {
-      if (!fs.existsSync(file)) return this;
+      if (!fs.existsSync(file)) {
+        data = { sessions: [] };
+        return this;
+      }
       const raw = fs.readFileSync(file, 'utf8');
       try {
         data = JSON.parse(raw);
@@ -25,7 +28,7 @@ function createStore({ file, log }) {
         if (log) log.warn('store.corrupt', { file, backup });
         data = { sessions: [] };
       }
-      if (!Array.isArray(data.sessions)) data = { sessions: [] };
+      if (!data || typeof data !== 'object' || !Array.isArray(data.sessions)) data = { sessions: [] };
       return this;
     },
     all() {

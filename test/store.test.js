@@ -45,3 +45,24 @@ test('writeJsonAtomic 不留 .tmp', () => {
   assert.deepStrictEqual(fs.readdirSync(path.dirname(file)), ['sessions.json']);
   fs.rmSync(path.dirname(file), { recursive: true, force: true });
 });
+
+test('文件内容为 null 时不抛异常并返回空表', () => {
+  const file = tmpFile();
+  fs.writeFileSync(file, 'null');
+  let s;
+  assert.doesNotThrow(() => {
+    s = createStore({ file }).load();
+  });
+  assert.deepStrictEqual(s.all(), []);
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+});
+
+test('落盘后文件被外部删除，再次 load 返回空表', () => {
+  const file = tmpFile();
+  const s = createStore({ file }).load();
+  s.upsert({ id: 's1', chatId: 'oc_1' });
+  fs.unlinkSync(file);
+  s.load();
+  assert.deepStrictEqual(s.all(), []);
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+});
