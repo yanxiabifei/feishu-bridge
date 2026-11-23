@@ -4,8 +4,9 @@ const { createFeishuWs, createDedup } = require('../src/feishu/ws');
 
 function makeSdk() {
   const registered = {};
-  const state = { clientOpts: null, startArgs: null, closed: false };
+  const state = { clientOpts: null, dispatcherOpts: null, startArgs: null, closed: false };
   class EventDispatcher {
+    constructor(opts) { state.dispatcherOpts = opts; }
     register(map) {
       Object.assign(registered, map);
       return this;
@@ -64,6 +65,12 @@ test('start 传入 dispatcher；客户端静默日志', async () => {
   assert.strictEqual(state.clientOpts.appId, 'cli_0123456789abcdef');
   assert.strictEqual(state.clientOpts.loggerLevel, 0);
   assert.strictEqual(state.clientOpts.domain, 0);
+});
+
+test('EventDispatcher 也使用 fatal 级别静默日志', () => {
+  const { state } = setup();
+  assert.ok(state.dispatcherOpts);
+  assert.strictEqual(state.dispatcherOpts.loggerLevel, 0);
 });
 
 test('消息事件以拍平对象下发（event_id 在顶层）', async () => {
@@ -153,4 +160,57 @@ test('createDedup 在 ttl 之后允许同 id 再次通过', () => {
   assert.strictEqual(dedup.isDuplicate('a'), true);
   clock = 1001;
   assert.strictEqual(dedup.isDuplicate('a'), false);
+});
+
+test('createDedup max 是硬上限，全新鲜时按插入顺序淘汰最老', () => {
+  const dedup = createDedup({ ttl: 600000, max: 3, now: () => 0 });
+  for (let i = 0; i < 10; i++) dedup.isDuplicate(`ev_${i}`);
+  assert.strictEqual(dedup.size(), 3);
+  // 最老的 ev_0..ev_6 已被淘汰，重新出现不算重复
+  assert.strictEqual(dedup.isDuplicate('ev_0'), false);
+  assert.strictEqual(dedup.size(), 3);
+  // 最近的 ev_9 仍在窗口内
+  assert.strictEqual(dedup.isDuplicate('ev_9'), true);
+});
+
+test('createDedup max=1 与 max=0 不崩且语义合理', () => {
+  const one = createDedup({ ttl: 600000, max: 1, now: () => 0 });
+  assert.strictEqual(one.isDuplicate('a'), false);
+  assert.strictEqual(one.isDuplicate('b'), false);
+  assert.strictEqual(one.size(), 1);
+  assert.strictEqual(one.isDuplicate('b'), true);
+  assert.strictEqual(one.isDuplicate('a'), false);
+
+  const zero = createDedup({ ttl: 600000, max: 0, now: () => 0 });
+  assert.strictEqual(zero.isDuplicate('a'), false);
+  assert.strictEqual(zero.isDuplicate('a'), false);
+  assert.strictEqual(zero.size(), 0);
+});
+
+test('dedup 传 null 时退化为默认去重而非吞事件', async () => {
+  const { registered, calls } = setup({ dedup: null });
+  const payload = { event_id: 'ev_null_dedup', message: { chat_id: 'oc_1' } };
+  await registered['im.message.receive_v1'](payload);
+  await registered['im.message.receive_v1'](payload);
+  assert.strictEqual(calls.message.length, 1);
+});
+
+test('domain 传 null 时回落到默认 Feishu', async () => {
+  const { ws, state } = setup({ domain: null });
+  await ws.start();
+  assert.strictEqual(state.clientOpts.domain, 0);
+});
+
+test('非 Error 拒绝/抛出值的日志可读', async () => {
+  const s = setup({
+    handlers: {
+      onMessage: async () => { throw 'plain async boom'; },
+      onBotAdded: () => { throw { code: 42 }; },
+    },
+  });
+  await s.registered['im.message.receive_v1']({ event_id: 'e_plain_async' });
+  await new Promise((r) => setImmediate(r));
+  await s.registered['im.chat.member.bot.added_v1']({ event_id: 'e_plain_sync' });
+  assert.ok(s.logs.some((m) => m.includes('plain async boom')));
+  assert.ok(s.logs.some((m) => m.includes('[object Object]')));
 });

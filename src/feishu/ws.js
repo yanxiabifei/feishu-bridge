@@ -9,11 +9,12 @@ function createDedup({ ttl = 10 * 60 * 1000, max = 5000, now = () => Date.now() 
 
   return {
     isDuplicate(id) {
-      if (!id) return false;
+      if (!id || max <= 0) return false;
       const t = now();
       if (seen.size >= max) sweep(t);
       const prev = seen.get(id);
       if (prev !== undefined && t - prev <= ttl) return true;
+      while (seen.size >= max) seen.delete(seen.keys().next().value);
       seen.set(id, t);
       return false;
     },
@@ -38,10 +39,17 @@ function createFeishuWs({
   sdk,
   handlers = {},
   log,
-  dedup = createDedup(),
+  dedup,
   domain,
 }) {
   const Lark = sdk || require('@larksuiteoapi/node-sdk');
+  log = log ?? {};
+  dedup = dedup ?? createDedup();
+  domain = domain ?? Lark.Domain.Feishu;
+
+  function errText(err) {
+    return err instanceof Error ? err.message : String(err);
+  }
 
   function dispatch(name, data) {
     if (data && data.event_id && dedup.isDuplicate(data.event_id)) {
@@ -53,14 +61,20 @@ function createFeishuWs({
     try {
       const ret = fn(data);
       if (ret && typeof ret.then === 'function') {
-        ret.catch((err) => log?.error?.(`ws: handler ${name} failed: ${err && err.message}`));
+        ret.catch((err) => log?.error?.(`ws: handler ${name} failed: ${errText(err)}`));
       }
     } catch (err) {
-      log?.error?.(`ws: handler ${name} threw: ${err && err.message}`);
+      log?.error?.(`ws: handler ${name} threw: ${errText(err)}`);
     }
   }
 
-  const dispatcher = new Lark.EventDispatcher({});
+  // SDK 1.77 用 `params.loggerLevel || LoggerLevel.info` 取级别，fatal(0) 会被
+  // 当成 falsy 回落成 info；额外传空 logger 才能真正静默。
+  const noopLogger = { error() {}, warn() {}, info() {}, debug() {}, trace() {} };
+  const dispatcher = new Lark.EventDispatcher({
+    loggerLevel: Lark.LoggerLevel.fatal,
+    logger: noopLogger,
+  });
   dispatcher.register({
     'im.message.receive_v1': (data) => dispatch('onMessage', data),
     'im.chat.disbanded_v1': (data) => dispatch('onDisbanded', data),
@@ -73,7 +87,7 @@ function createFeishuWs({
     appId,
     appSecret,
     loggerLevel: Lark.LoggerLevel.fatal,
-    domain: domain === undefined ? Lark.Domain.Feishu : domain,
+    domain,
   });
 
   return {
