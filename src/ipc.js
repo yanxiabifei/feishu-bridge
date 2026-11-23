@@ -3,6 +3,23 @@ const path = require('node:path');
 const http = require('node:http');
 const { WebSocketServer } = require('ws');
 
+function safeInvoke(log, name, fn) {
+  setImmediate(() => {
+    let ret;
+    try {
+      ret = fn();
+    } catch (err) {
+      if (log && log.warn) log.warn(`ipc: ${name} threw: ${(err && err.message) || err}`);
+      return;
+    }
+    if (ret && typeof ret.then === 'function') {
+      ret.then(undefined, (err) => {
+        if (log && log.warn) log.warn(`ipc: ${name} rejected: ${(err && err.message) || err}`);
+      });
+    }
+  });
+}
+
 function startIpc({ port = 0, token, handlers = {}, log, ipcFile }) {
   const clients = new Set();
 
@@ -29,10 +46,8 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile }) {
         let payload = {};
         try { payload = JSON.parse(body); } catch { /* 空 body 按空对象处理 */ }
         const sessionId = url.searchParams.get('session') || '';
-        try {
-          if (handlers.onHookStop) handlers.onHookStop({ sessionId, payload });
-        } catch (err) {
-          if (log) log.warn('ipc.hook_handler_error', { error: String((err && err.message) || err) });
+        if (handlers.onHookStop) {
+          safeInvoke(log, 'onHookStop', () => handlers.onHookStop({ sessionId, payload }));
         }
       });
       return;
@@ -53,14 +68,14 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile }) {
     ws.on('message', (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
-      try {
-        if (handlers.onClientMessage) handlers.onClientMessage(msg, ws);
-      } catch (err) {
-        if (log) log.warn('ipc.client_handler_error', { error: String((err && err.message) || err) });
+      if (handlers.onClientMessage) {
+        safeInvoke(log, 'onClientMessage', () => handlers.onClientMessage(msg, ws));
       }
     });
     ws.on('close', () => clients.delete(ws));
-    if (handlers.onClientOpen) handlers.onClientOpen(ws);
+    if (handlers.onClientOpen) {
+      safeInvoke(log, 'onClientOpen', () => handlers.onClientOpen(ws));
+    }
   });
 
   return new Promise((resolve) => {
