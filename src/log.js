@@ -28,7 +28,9 @@ function redact(value, redactor = createRedactor(), depth = 0) {
       stack: redactor.scrub(String(value.stack || '')),
     };
   }
-  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+  }
   if (value && typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
