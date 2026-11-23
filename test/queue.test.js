@@ -49,6 +49,19 @@ test('超过上限触发 onOverflow 且不丢已有队列', () => {
   assert.strictEqual(q.pending(), 3);
 });
 
+test('size 统计排队项与在途项之和', () => {
+  let ready = false;
+  const q = createQueue({ canWrite: () => ready, write: () => {} });
+  assert.strictEqual(q.size(), 0);
+  q.push('a');
+  q.push('b');
+  assert.strictEqual(q.size(), 2);
+  ready = true;
+  q.release();
+  assert.strictEqual(q.inFlight(), true);
+  assert.strictEqual(q.size(), 2);
+});
+
 test('在途项也计入上限', () => {
   const q = createQueue({ limit: 1, canWrite: () => true, write: () => {} });
   assert.strictEqual(q.push('a'), 'queued');
