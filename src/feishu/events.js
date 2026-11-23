@@ -1,6 +1,8 @@
 function parseContent(raw) {
   try {
-    return JSON.parse(raw || '{}');
+    const value = JSON.parse(raw || '{}');
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return value;
   } catch {
     return {};
   }
@@ -13,6 +15,12 @@ function postToText(post) {
     if (el.tag === 'text') return String(el.text || '');
     if (el.tag === 'a') return String(el.text || '') || String(el.href || '');
     if (el.tag === 'at') return el.user_name ? `@${el.user_name}` : '';
+    if (el.tag === 'code_block' || el.tag === 'md') {
+      const parts = Array.isArray(el.text) ? el.text : [el.text];
+      return parts.map((p) => String((p && typeof p === 'object' ? p.text : p) || '')).join('');
+    }
+    if (el.tag === 'img') return '[图片]';
+    if (el.tag === 'hr') return '---';
     return '';
   }).join(''));
   const body = lines.filter((l) => l !== '').join('\n');
