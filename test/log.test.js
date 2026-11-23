@@ -43,3 +43,19 @@ test('createLogger 写 JSONL，一行一条，且不含密钥字面量', () => {
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('createLogger 将 Error 序列化为可读字段并按字面量脱敏', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-log-'));
+  const log = createLogger({ dir, now: () => new Date('2026-11-23T13:00:00Z') });
+  log.redactor.add('boom-internal');
+  log.error('explode', { err: new Error('boom-internal') });
+
+  const file = path.join(dir, '2026-11-23.jsonl');
+  const lines = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.strictEqual(lines[0].err.name, 'Error');
+  assert.strictEqual(lines[0].err.message, '***');
+  assert.match(lines[0].err.stack, /\*\*\*/);
+  assert.strictEqual(redact(new Error('boom-internal')).message, 'boom-internal');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});

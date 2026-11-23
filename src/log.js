@@ -21,6 +21,14 @@ function redact(value, redactor = createRedactor(), depth = 0) {
   if (depth > 8) return '[deep]';
   if (typeof value === 'string') return redactor.scrub(value);
   if (Array.isArray(value)) return value.map((v) => redact(v, redactor, depth + 1));
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: redactor.scrub(String(value.message)),
+      stack: redactor.scrub(String(value.stack || '')),
+    };
+  }
+  if (value instanceof Date) return value.toISOString();
   if (value && typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) {

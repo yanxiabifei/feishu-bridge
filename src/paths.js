@@ -4,23 +4,20 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 const STATE = path.join(ROOT, 'state');
+const LOGS = path.join(ROOT, 'logs');
+const HOOKS = path.join(STATE, 'hooks');
+const MEDIA = path.join(STATE, 'media');
 
 module.exports = {
-  ROOT,
-  STATE,
-  LOGS: path.join(ROOT, 'logs'),
+  ROOT, STATE, LOGS, HOOKS, MEDIA,
   CONFIG: path.join(STATE, 'config.json'),
   SECRET: path.join(STATE, 'secret.bin'),
   PROJECTS: path.join(STATE, 'projects.json'),
   SESSIONS: path.join(STATE, 'sessions.json'),
   IPC: path.join(STATE, 'ipc.json'),
-  HOOKS: path.join(STATE, 'hooks'),
-  MEDIA: path.join(STATE, 'media'),
   HOOK_SCRIPT: path.join(ROOT, 'bin', 'hook-stop.js'),
   CLAUDE_JSON: path.join(os.homedir(), '.claude.json'),
   ensureDirs() {
-    for (const d of [this.STATE, this.LOGS, this.HOOKS, this.MEDIA]) {
-      fs.mkdirSync(d, { recursive: true });
-    }
+    for (const d of [STATE, LOGS, HOOKS, MEDIA]) fs.mkdirSync(d, { recursive: true });
   },
 };
