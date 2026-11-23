@@ -220,6 +220,8 @@ D:\feishu-bridge\
   - 这条是 v1 就做的，不是后续优化——它是手机端盲写唯一的护栏。
 - 飞书发来的图片/文件（`im:resource` 下载到 `D:\feishu-bridge\state\media\<chatId>\`）→ 写入一行本地绝对路径 + 用户文字，让 CLI 自己读。
 
+**飞书长连接的 3 秒硬时限（必须显式设计）**：官方要求事件回调在 3 秒内返回且不抛异常，否则触发重推。所以 daemon 收到 `im.message.receive_v1` 后**只做「入队 + 立即 ack」**——文本解析、屏幕状态判断、PTY 写入、卡片发送全部丢进异步队列，回调本身立刻返回。重推用 `event_id` 去重（内存里保留最近 1 小时的 id）。建群、写 `sessions.json`、调飞书 API 这些慢操作一律不在回调里做。
+
 ### 6.2 输出方向：Claude
 
 **来源不是屏幕，是 transcript。**
@@ -229,21 +231,36 @@ daemon 起 claude 时带 --settings D:\feishu-bridge\state\hooks\<sessionId>.hoo
   该文件只包含一个 Stop hook：
     { "hooks": { "Stop": [ { "hooks": [ { "type": "command",
         "command": "node \"D:\\feishu-bridge\\bin\\hook-stop.js\"" } ] } ] } }
-claude 每轮结束 → hook 收到 stdin JSON（session_id/transcript_path/cwd）
-              → POST 到 daemon 的本地端口 → daemon 知道「这一轮结束了」
-→ daemon 读 transcript 最后一段 assistant 文本 → 推送到飞书
+claude 每轮结束 → hook 收到 stdin JSON → 取 last_assistant_message
+              → POST 到 daemon 的本地端口 → daemon 直接把它推送到飞书
 ```
 
-- 用 `--settings` 是为了**不碰你的全局 `settings.json`**，你正常在 Windows Terminal 里跑的 claude 完全不受影响。
-- 若实测发现 `--settings` 会整体覆盖而非合并（丢失 DeepSeek 端点），降级方案：往全局 `settings.json` 追加同一个 hook，并在 `hook-stop.js` 里用 `session_id` 白名单过滤——白名单外的直接退出，零副作用。
+**正文来源 = `last_assistant_message`（实测确认）。** 2026-11-23 在本机用 `claude -p --settings <只含 hooks 的文件>` 实测，Stop hook 的 stdin 完整字段为：
+
+```json
+{ "session_id": "...", "transcript_path": "...", "cwd": "D:\\tmp\\hooktest",
+  "prompt_id": "...", "permission_mode": "bypassPermissions",
+  "effort": { "level": "high" }, "hook_event_name": "Stop",
+  "stop_hook_active": false, "last_assistant_message": "好的",
+  "background_tasks": [], "session_crons": [] }
+```
+
+`last_assistant_message` 就是本轮最终回复的原始文本，**daemon 不需要读 JSONL、不需要定位「最后一段 assistant」、不需要处理截断和格式差异**。`transcript_path` 只作为兜底保留（hook 丢包、或该字段为空时再去读文件）。
+
+- 用 `--settings` 是为了**不碰你的全局 `settings.json`**。**已实测确认合并行为**：只含 `hooks` 的 `--settings` 文件与全局配置深合并，全局的 DeepSeek 端点完整保留（该次运行模型仍为 `deepseek-flash`，退出码 0，回复正常）。因此不需要降级方案。
+- 仍保留降级开关：若未来某个版本变成整体覆盖（症状是启动即报鉴权失败），改用「全局 `settings.json` 追加 hook + `session_id` 白名单过滤」，白名单外的直接退出，零副作用。这是一个 5 行的逃生门，不预先实现。
 - **为什么不用屏幕**：Claude Code 的 TUI 会截断（`… +23 lines`）、换行、刷色、滚出缓冲区，而且「屏幕不动了」不等于「这轮结束了」（spinner 和 `Thinking… 12s` 计时器一直在动）。transcript 是逐字、结构化、只追加的，Stop hook 给出精确的轮次边界。
 
 ### 6.3 输出方向：Codex
 
 v1 用**终端画面序列化**：`@xterm/headless` 拿可见区文本 → 去掉 ANSI → 作为纯文本推送，附一个「查看完整画面」按钮（返回最近 200 行）。
 
-- 理由：本机 `~/.codex/sessions/` 还不存在，Codex 的 transcript 位置与格式未经实测，不能写进 v1 的关键路径。
-- 第一次跑通 Codex 后立刻核实其会话文件，**若存在结构化 transcript 就升级成和 Claude 同一套**（`codex exec` 已确认支持 `resume`），届时把本节降级为「兜底」。
+事实分两层，不能混：
+
+- **已知**：Codex CLI 的会话记录惯例路径是 `%USERPROFILE%\.codex\sessions\YYYY\MM\DD\rollout-*.jsonl`，JSONL 格式。
+- **本机实测（2026-11-23）**：`C:\Users\<用户名>\.codex\` 存在，但**没有 `sessions\` 目录**。里面有 `config.toml`、`logs_2.sqlite`(4.3MB)、`goals_1.sqlite`、`.codex-global-state.json`、`computer-use\`、`.sandbox\`。也就是说这台机器上的 Codex 还没产出 rollout 文件，而且它的本地存储看起来是 sqlite 而非纯 JSONL 目录——版本可能与公开文档不一致。
+
+所以结论不变但理由换了：**不是「路径不存在」，而是「本机实际布局与公开文档不符，且无样本可验证 record 结构」**，因此不能写进 v1 关键路径。v1 用画面序列化兜底；第一次跑通 Codex 后立刻实测其落盘位置与结构（`codex exec` 已确认支持 `resume`），能升级就升级成和 Claude 同一套。
 
 ### 6.4 手机端长什么样
 
@@ -291,13 +308,14 @@ v1 用**终端画面序列化**：`@xterm/headless` 拿可见区文本 → 去�
 |---|---|
 | 手机解散群 | `im.chat.disbanded_v1` 事件 → kill PTY → 窗口显示「会话已结束」并 3s 后自动关 |
 | 手机解散群（事件丢了） | daemon 每 30s 抽检非 idle 会话的 `im.chat.get`，返回不存在即按上一条处理 |
-| 电脑关窗口 | 若 `running` → 弹一次确认「任务还在跑，确定结束？」→ kill PTY → 群里发「会话已结束」 |
-| 电脑关窗口（未在跑） | 直接 kill PTY + 群里发结束提示 |
+| 电脑关窗口 | 弹两选：**结束会话**（默认）/ 只关窗口。结束 → kill PTY + 群里发「会话已结束」；只关窗口 → 会话留在后台，群里提示「电脑窗口已关，手机照常可发」。`running` 时默认按钮改成「取消」，防误触 |
 | 机器人被移出群 | 等同解散 |
 | PTY 进程崩溃 | 状态转 `error`，群里发「进程异常退出（code）」，窗口保留并给「重来」按钮（`--resume`） |
 | Electron 进程被杀 | daemon 检测到 IPC 断开 → 会话转 `interrupted`，PTY 保留 10 分钟；期间再点图标可「接回」；超时则 kill + 群里提示 |
 | daemon 重启（开机/崩溃自恢复） | 读 `sessions.json`：PTY 已不在 → 全部转 `interrupted`，群里逐条提示「电脑重启了，回一条消息我就接上」；收到该群消息时用 `--resume <claudeSessionId>` 重建 |
 | PTY 空闲超时 | v1 不启用（你选了全自动，超时杀进程属于多余的限制） |
+
+**Electron 与 daemon 的生命周期是分开的两件事**：走了「只关窗口」这条路的会话，窗口没了但 PTY 还活着；所有窗口都没了 Electron 进程自己退出，daemon 照常活着——手机还能发消息。下次双击图标时，Electron 从 `state/ipc.json` 连回 daemon，拉出存活会话列表，问你「接回已有的 N 个会话，还是开一个新的？」。任务栏图标只代表 Electron 在不在，**不代表会话在不在**。会话结束只有两个入口：关窗口时选「结束会话」，或手机解散群。
 
 **autoDisband（机器人主动解散群）**：默认关闭。飞书解散他人建的群需要 `im:chat` 写权限且行为不可逆，误杀代价高。默认只发「会话已结束」，群留给你手动删。
 
@@ -366,7 +384,7 @@ v1 用**终端画面序列化**：`@xterm/headless` 拿可见区文本 → 去�
 
 | 用途 | 选型 | 理由 |
 |---|---|---|
-| PTY | `node-pty` | Windows 走 ConPTY，是官方路径 |
+| PTY | `node-pty` | Windows 走 ConPTY；Win11 已实测可用（见 §12 第 0 条） |
 | 屏幕快照/状态判断 | `@xterm/headless` + `xterm-addon-serialize` | 纯内存，无需渲染 |
 | 电脑窗口 | **Electron** | Node 已装，不需要 Rust 工具链 |
 | 终端渲染 | `xterm.js` + `xterm-addon-fit` | 事实标准 |
@@ -378,11 +396,24 @@ v1 用**终端画面序列化**：`@xterm/headless` 拿可见区文本 → 去�
 
 运行时依赖只有 Node（v24.17.0 已确认）。
 
+**一个顺带的好处**：因为 PTY 由 daemon（纯 Node 进程）持有，Electron 侧**完全不加载 node-pty**，所以不需要 `electron-rebuild`、也不会遇到「Electron 里 ConPTY runtime 文件缺失」这类问题。窗口进程只依赖 `ws` 和 `xterm.js`，没有任何原生模块。这是拆两个进程的额外收益。
+
 ---
 
 ## 12. 验收标准
 
-按顺序逐条实测，全过才算完成：
+**第 0 条是前置门槛，不过就不写同步逻辑**：
+
+0. **ConPTY 最小验证**（✅ 2026-11-23 已实测通过，Node v24.17.0 / Win11 / `node-pty` + `@xterm/headless` 6.0.0）：
+   - ① 能进入交互界面 —— 通过，TUI 正常渲染，`deepseek-flash` 端点生效。
+   - ② 能写入并提交一条输入 —— 通过，键盘输入逐字回显在 `❯` 提示行，`\r` 提交，15 秒内看到 `● 好的`。
+   - ③ 输出喂进 `@xterm/headless` 能拿到干净的可见区文本 —— 通过，buffer 逐行 `translateToString(true)` 得到无转义序列的纯文本。
+   - ④ 窗口 resize 生效 —— 通过，`term.resize(40,15)` + `pty.resize(40,15)` 后 buffer 行宽变为 40、claude 自动重绘。
+   - **实测新增的两个坑，实现时必须处理**：
+     - **信任对话框**：claude 首次在某个未信任目录启动会弹 `Do you want to trust this folder?`，默认高亮是 **`No, exit`**，此时回一个 `\r` 会直接退出（实测退出码 1）。daemon 启动 PTY 后要先扫首屏，命中该对话框就发送 `\x1b[B` + `\r`（或提前把项目目录写进信任列表）。
+     - **路径分隔符**：`node-pty` 的 `cwd` 不能让反斜杠穿过 JSON/模板被转义（`D:\tmp` 里的 `\t` 会变成制表符，报 `error code 267`）。所有传给 `pty.spawn` 的路径一律用正斜杠或 `path.resolve()` 的结果。
+
+以下按顺序逐条实测，全过才算完成：
 
 1. 手机拉群 @机器人 说「卡牌 你好」→ 1 秒内电脑弹出窗口，窗口里是 claude 的首屏 → 群里收到回复卡片。
 2. 手机再发「列出这个目录的文件」→ 电脑窗口里同步出现同一句话和 claude 的回答。
