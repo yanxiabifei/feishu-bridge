@@ -20,8 +20,8 @@ function createApi({
   let tokenExp = 0;
   let inflight = null;
 
-  function getToken(force = false) {
-    if (!force && token && now() < tokenExp - 60000) return Promise.resolve(token);
+  function getToken() {
+    if (token && now() < tokenExp - 60000) return Promise.resolve(token);
     if (inflight) return inflight;
     inflight = (async () => {
       const res = await fetchImpl(`${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
@@ -69,8 +69,6 @@ function createApi({
   };
 
   return {
-    token: getToken,
-
     sendText: (chatId, text) => sendMessage(chatId, 'text', { text }),
 
     sendCard: (chatId, card) => sendMessage(chatId, 'interactive', card),
