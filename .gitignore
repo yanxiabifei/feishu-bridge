@@ -3,3 +3,5 @@ state/
 logs/
 dist/
 *.log
+
+.worktrees/
