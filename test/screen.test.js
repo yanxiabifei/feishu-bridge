@@ -50,6 +50,7 @@ test('构造时传 allowProposedApi，否则 buffer 不可用', () => {
   assert.strictEqual(terminal().opts.allowProposedApi, true);
   assert.strictEqual(terminal().opts.cols, 120);
   assert.strictEqual(terminal().opts.rows, 30);
+  assert.strictEqual(terminal().opts.scrollback, 1000);
 });
 
 test('write 转发到终端并等解析完成', async () => {
@@ -136,6 +137,60 @@ test('inInputBox：有 ❯ 输入框为 true，菜单光标/无提示符为 fals
   terminal().lines = ['PS D:\\feishu-workspace> '];
   terminal().buffer.active.cursorY = 0;
   assert.strictEqual(screen.inInputBox(), false);
+});
+
+test('inputLine / inInputBox 支持 Codex 的 › 提示符', () => {
+  const { screen, terminal } = setup();
+  terminal().lines = ['› 你好，Codex'];
+  terminal().buffer.active.cursorY = 0;
+  assert.strictEqual(screen.inInputBox(), true);
+  assert.strictEqual(screen.inputLine(), '你好，Codex');
+});
+
+test('inInputBox 不把信任弹窗与正文中出现的提示符误判为输入框', () => {
+  const { screen, terminal } = setup();
+  terminal().lines = ['❯ No, exit', '   Yes, I trust this folder'];
+  terminal().buffer.active.cursorY = 1;
+  assert.strictEqual(screen.inInputBox(), false);
+
+  terminal().lines = ['输出里提到提示符 ❯ 只是文档说明'];
+  terminal().buffer.active.cursorY = 0;
+  assert.strictEqual(screen.inInputBox(), false);
+});
+
+test('inInputBox 允许状态页脚位于提示符行下方', () => {
+  const { screen, terminal } = setup();
+  terminal().lines = [
+    '❯ ',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)   ? for shortcuts',
+  ];
+  terminal().rows = 2;
+  terminal().buffer.active.cursorY = 0;
+  assert.strictEqual(screen.inInputBox(), true);
+});
+
+test('write 未解析完成时 isReady 为 false', () => {
+  let finish;
+  let clock = 10_000;
+  let terminal;
+  const screen = createScreen({
+    quietMs: 400,
+    now: () => clock,
+    terminalFactory: (opts) => {
+      terminal = fakeTerminal(opts);
+      terminal.write = (data, cb) => {
+        terminal.writes.push(data);
+        finish = cb;
+      };
+      return terminal;
+    },
+  });
+
+  screen.write('x');
+  clock += 1000; // 即使早已超过静默阈值，仍有待解析写入
+  assert.strictEqual(screen.isReady(), false);
+  finish();
+  assert.strictEqual(screen.isReady(), true);
 });
 
 test('resize / dispose 透传', () => {
