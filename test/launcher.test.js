@@ -15,8 +15,9 @@ test('trustKey 把反斜杠统一成正斜杠', () => {
   assert.strictEqual(trustKey('D:\\work\\alpha'), 'D:/work/alpha');
 });
 
-test('ensureTrusted 首次写入 true，再次调用 false，其他项目与顶层字段不受影响', () => {
+test('ensureTrusted 首次写入 true，再次调用 false，其他项目与顶层字段不受影响', (t) => {
   const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, '.claude.json');
   fs.writeFileSync(file, JSON.stringify({
     projects: { 'D:/other': { hasTrustDialogAccepted: false, x: 1 } },
@@ -28,20 +29,58 @@ test('ensureTrusted 首次写入 true，再次调用 false，其他项目与顶�
   assert.strictEqual(doc.projects['D:/other'].hasTrustDialogAccepted, false);
   assert.strictEqual(doc.numStartups, 7);
   assert.strictEqual(ensureTrusted({ claudeJsonPath: file, cwd: 'D:/work/alpha' }), false);
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('ensureTrusted 在 .claude.json 不存在时创建最小结构', () => {
+test('ensureTrusted 在 .claude.json 不存在时创建最小结构', (t) => {
   const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, '.claude.json');
   assert.strictEqual(ensureTrusted({ claudeJsonPath: file, cwd: 'D:/a' }), true);
   const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.strictEqual(doc.projects['D:/a'].hasTrustDialogAccepted, true);
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('writeHookFile 生成 Stop 命令并带上 --session', () => {
+test('ensureTrusted 遇到空文件不抛异常、返回 false 且不改写文件', (t) => {
   const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '.claude.json');
+  fs.writeFileSync(file, '');
+  assert.strictEqual(ensureTrusted({ claudeJsonPath: file, cwd: 'D:/a' }), false);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), '');
+});
+
+test('ensureTrusted 遇到 JSON null 不抛异常、返回 false 且不改写文件', (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '.claude.json');
+  fs.writeFileSync(file, 'null');
+  assert.strictEqual(ensureTrusted({ claudeJsonPath: file, cwd: 'D:/a' }), false);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'null');
+});
+
+test('ensureTrusted 遇到截断 JSON 不抛异常、返回 false 且原样保留', (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '.claude.json');
+  const raw = '{"projects":';
+  fs.writeFileSync(file, raw);
+  assert.strictEqual(ensureTrusted({ claudeJsonPath: file, cwd: 'D:/a' }), false);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), raw);
+});
+
+test('ensureTrusted 在 projects 不是对象时返回 false 且不改写文件', (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '.claude.json');
+  const raw = '{"projects":[]}';
+  fs.writeFileSync(file, raw);
+  assert.strictEqual(ensureTrusted({ claudeJsonPath: file, cwd: 'D:/a' }), false);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), raw);
+});
+
+test('writeHookFile 生成 Stop 命令并带上 --session', (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = writeHookFile({
     hooksDir: dir,
     sessionId: 's1',
@@ -53,11 +92,11 @@ test('writeHookFile 生成 Stop 命令并带上 --session', () => {
   assert.strictEqual(h.type, 'command');
   assert.ok(h.command.includes('hook-stop.js'));
   assert.ok(h.command.includes('--session s1'));
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('prepareClaude：无 claudeSessionId 不带 --resume，有则带', () => {
+test('prepareClaude：无 claudeSessionId 不带 --resume，有则带', (t) => {
   const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const config = { claudeExe: 'D:/Claude Code/claude.exe', claudeArgs: ['--permission-mode', 'bypassPermissions'] };
   const common = {
     config,
@@ -80,7 +119,6 @@ test('prepareClaude：无 claudeSessionId 不带 --resume，有则带', () => {
     ...common,
   });
   assert.deepStrictEqual(resumed.args.slice(-2), ['--resume', 'abc-123']);
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('buildLaunch：codex 走 node + codex.js', () => {

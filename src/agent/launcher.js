@@ -5,13 +5,26 @@ function trustKey(cwd) {
   return cwd.replace(/\\/g, '/');
 }
 
+function isPlainObject(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 // 返回 true 表示本次写入了信任标记（供日志用）
 function ensureTrusted({ claudeJsonPath, cwd }) {
   let doc = {};
   if (fs.existsSync(claudeJsonPath)) {
-    doc = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+    try {
+      doc = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+    } catch {
+      return false;
+    }
+    if (!isPlainObject(doc)) return false;
   }
-  doc.projects = doc.projects || {};
+  if (doc.projects === undefined) {
+    doc.projects = {};
+  } else if (!isPlainObject(doc.projects)) {
+    return false;
+  }
   const key = trustKey(cwd);
   const cur = doc.projects[key] || {};
   if (cur.hasTrustDialogAccepted === true) return false;
