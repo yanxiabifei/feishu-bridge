@@ -67,10 +67,17 @@ test('start 传入 dispatcher；客户端静默日志', async () => {
   assert.strictEqual(state.clientOpts.domain, 0);
 });
 
-test('EventDispatcher 也使用 fatal 级别静默日志', () => {
+test('EventDispatcher 使用 fatal 级别并注入静默 logger', () => {
   const { state } = setup();
   assert.ok(state.dispatcherOpts);
   assert.strictEqual(state.dispatcherOpts.loggerLevel, 0);
+  // 仅凭 Level 0 不够：SDK 用 `loggerLevel || LoggerLevel.info`，fatal 会被当成假值
+  // 回落成 info，必须额外注入一个各方法齐全的 logger 才能真正静默。
+  const logger = state.dispatcherOpts.logger;
+  assert.ok(logger, 'dispatcherOpts.logger 应存在');
+  for (const method of ['error', 'warn', 'info', 'debug', 'trace']) {
+    assert.strictEqual(typeof logger[method], 'function', `logger.${method} 应为函数`);
+  }
 });
 
 test('消息事件以拍平对象下发（event_id 在顶层）', async () => {
