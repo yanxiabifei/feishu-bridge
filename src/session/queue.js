@@ -45,7 +45,6 @@ function createQueue({
     },
     drain() {
       const rest = items.splice(0);
-      inFlight = false;
       return rest;
     },
   };

@@ -49,13 +49,43 @@ test('超过上限触发 onOverflow 且不丢已有队列', () => {
   assert.strictEqual(q.pending(), 3);
 });
 
-test('drain 返回未处理的项并清空', () => {
-  const q = createQueue({ canWrite: () => false, write: () => {} });
+test('在途项也计入上限', () => {
+  const q = createQueue({ limit: 1, canWrite: () => true, write: () => {} });
+  assert.strictEqual(q.push('a'), 'queued');
+  assert.strictEqual(q.inFlight(), true);
+  assert.strictEqual(q.push('b'), 'full');
+});
+
+test('不可写时连续释放两次按序排空', () => {
+  const written = [];
+  let ready = false;
+  const q = createQueue({ canWrite: () => ready, write: (x) => written.push(x) });
   q.push('a');
   q.push('b');
-  assert.deepStrictEqual(q.drain(), ['a', 'b']);
+  assert.deepStrictEqual(written, []);
+  ready = true;
+  q.release();
+  assert.deepStrictEqual(written, ['a']);
+  q.release();
+  assert.deepStrictEqual(written, ['a', 'b']);
+});
+
+test('drain 只清空排队项，不影响在途', () => {
+  const written = [];
+  const q = createQueue({ canWrite: () => true, write: (x) => written.push(x) });
+  q.push('turn-1');
+  assert.deepStrictEqual(written, ['turn-1']);
+  assert.strictEqual(q.inFlight(), true);
+
+  assert.strictEqual(q.push('queued-2'), 'queued');
+  assert.deepStrictEqual(q.drain(), ['queued-2']);
   assert.strictEqual(q.pending(), 0);
-  assert.strictEqual(q.inFlight(), false);
+  assert.strictEqual(q.inFlight(), true);
+
+  assert.strictEqual(q.push('turn-3'), 'queued');
+  assert.deepStrictEqual(written, ['turn-1']);
+  q.release();
+  assert.deepStrictEqual(written, ['turn-1', 'turn-3']);
 });
 
 test('write 抛异常时不把队列卡死，交给 onError', () => {
