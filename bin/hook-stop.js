@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// bin/hook-stop.js
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
