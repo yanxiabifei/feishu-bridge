@@ -65,6 +65,8 @@ function createPtySession({
       status = 'idle';
       session.status = 'idle';
       emit({ type: 'ready' });
+      queue.release();
+      return;
     }
     if (status === 'idle' && queue.pending() > 0 && !queue.inFlight()) {
       queue.release();
@@ -83,13 +85,22 @@ function createPtySession({
 
   function start() {
     if (pty || disposed) return;
-    const spec = launch();
-    pty = ptyFactory(spec);
-    pty.onData((data) => { screen.write(data); });
+    const l = launch(session);
+    pty = ptyFactory(l.file, l.args, {
+      name: 'xterm-256color',
+      cols: DEFAULT_COLS,
+      rows: DEFAULT_ROWS,
+      cwd: l.cwd,
+      env: { ...process.env, FORCE_COLOR: '1', TERM: 'xterm-256color' },
+    });
+    pty.onData((d) => {
+      screen.write(d);
+      emit({ type: 'data', data: d });
+    });
     pty.onExit((info) => { onExit(info); });
     readyTimer = setInterval(pollReady, READY_POLL_MS);
     if (readyTimer.unref) readyTimer.unref();
-    emit({ type: 'spawned', file: spec.file, cwd: spec.cwd });
+    emit({ type: 'spawned', pid: pty.pid });
   }
 
   function submitText(text, origin, { force = false } = {}) {
@@ -99,31 +110,34 @@ function createPtySession({
     }
     const seq = session.inputSeq + 1;
     session.inputSeq = seq;
-    session.lastInput = { origin, text, seq, at: now() };
-    const item = { text, origin, seq };
+    session.lastInput = { seq, origin, text, at: now() };
+    const item = { seq, text, origin };
     if (force) {
       // 菜单/弹窗挡住输入框时用户仍要求发送：无视 canWrite 判断直接写入。
       writeItem(item);
-      return 'written';
+      emit({ type: 'input', input: session.lastInput, queued: false, forced: true });
+      return 'queued';
     }
-    return queue.push(item);
+    const result = queue.push(item);
+    emit({ type: 'input', input: session.lastInput, queued: result === 'queued' });
+    return result;
   }
 
   function onPcKeys(data) {
     if (disposed || status === 'closed' || !pty) return;
     pty.write(data);
-    if (data.includes('\r')) {
+    if (data.includes('\r') || data.includes('\n')) {
       const seq = session.inputSeq + 1;
       session.inputSeq = seq;
-      session.lastInput = { origin: 'pc', text: screen.inputLine(), seq, at: now() };
+      session.lastInput = { seq, origin: 'pc', text: screen.inputLine(), at: now() };
       status = 'running';
       session.status = 'running';
-      emit({ type: 'pc-input', text: session.lastInput.text, seq });
+      emit({ type: 'pc-input', input: session.lastInput });
     }
   }
 
   function releaseTurn() {
-    if (disposed || status === 'closed') return;
+    if (disposed || status === 'closed' || status !== 'running') return;
     status = 'idle';
     session.status = 'idle';
     queue.release();
@@ -151,9 +165,9 @@ function createPtySession({
         chatId: session.chatId,
         agent: session.agent,
         cwd: session.cwd,
-        alias: session.alias,
+        alias: session.alias || null,
         status,
-        pending: queue.size(),
+        pending: queue.pending(),
         lastInput: session.lastInput,
       };
     },

@@ -6,11 +6,14 @@ const { createQueue } = require('../src/session/queue');
 function harness(overrides = {}) {
   const written = [];
   const events = [];
+  const launchCalls = [];
+  const factoryCalls = [];
   let dataHandler = () => {};
   let exitHandler = () => {};
   let ready = true;
 
   const pty = {
+    pid: 4242,
     onData(fn) { dataHandler = fn; },
     onExit(fn) { exitHandler = fn; },
     write(s) { written.push(s); },
@@ -36,8 +39,14 @@ function harness(overrides = {}) {
 
   const ps = createPtySession({
     session,
-    launch: () => ({ file: 'node', args: ['x.js'], cwd: 'D:/w' }),
-    ptyFactory: () => pty,
+    launch: (...args) => {
+      launchCalls.push(args);
+      return { file: 'node', args: ['x.js'], cwd: 'D:/w' };
+    },
+    ptyFactory: (file, args, opts) => {
+      factoryCalls.push({ file, args, opts });
+      return pty;
+    },
     screenFactory: () => screen,
     queueFactory: createQueue,
     log: { info() {}, warn() {}, error() {} },
@@ -46,7 +55,8 @@ function harness(overrides = {}) {
   });
 
   return {
-    ps, written, events, session,
+    ps, written, events, session, launchCalls, factoryCalls,
+    screenText() { return lastScreen; },
     setReady(v) { ready = v; },
     setInBox(v) { inBox = v; },
     emitData(d) { dataHandler(d); },
@@ -252,4 +262,113 @@ test('进程退出后提交不写入', () => {
   assert.strictEqual(result, 'closed');
   assert.strictEqual(h.written.length, 0);
   assert.strictEqual(h.events.filter((e) => e.type === 'exit').length, 1);
+});
+
+// ---- 事件契约对齐用例 ----
+
+test('PTY 输出同时写入屏幕并派发 data 事件', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.emitData('hello world');
+  const dataEvents = h.events.filter((e) => e.type === 'data');
+  assert.strictEqual(dataEvents.length, 1);
+  assert.strictEqual(dataEvents[0].data, 'hello world');
+  assert.strictEqual(h.screenText(), 'hello world');
+});
+
+test('spawned 事件只带 pid，不带 file/cwd', () => {
+  const h = harness();
+  h.ps.start();
+  const spawned = h.events.filter((e) => e.type === 'spawned');
+  assert.strictEqual(spawned.length, 1);
+  assert.strictEqual(spawned[0].pid, 4242);
+  assert.strictEqual('file' in spawned[0], false);
+  assert.strictEqual('cwd' in spawned[0], false);
+});
+
+test('launch 收到 session，ptyFactory 按 (file, args, opts) 三参调用', () => {
+  const h = harness();
+  h.ps.start();
+  assert.strictEqual(h.launchCalls.length, 1);
+  assert.strictEqual(h.launchCalls[0][0], h.session);
+
+  assert.strictEqual(h.factoryCalls.length, 1);
+  const { file, args, opts } = h.factoryCalls[0];
+  assert.strictEqual(file, 'node');
+  assert.deepStrictEqual(args, ['x.js']);
+  assert.strictEqual(opts.name, 'xterm-256color');
+  assert.strictEqual(opts.cols, 120);
+  assert.strictEqual(opts.rows, 30);
+  assert.strictEqual(opts.cwd, 'D:/w');
+  assert.strictEqual(opts.env.TERM, 'xterm-256color');
+  assert.strictEqual(opts.env.FORCE_COLOR, '1');
+});
+
+test('非 force 提交派发 input 事件（queued=true，input 为同一 lastInput）', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.ps.submitText('你好', 'phone');
+  const evs = h.events.filter((e) => e.type === 'input');
+  assert.strictEqual(evs.length, 1);
+  assert.strictEqual(evs[0].queued, true);
+  assert.strictEqual(evs[0].input, h.session.lastInput);
+  assert.deepStrictEqual(Object.keys(evs[0].input), ['seq', 'origin', 'text', 'at']);
+});
+
+test('非 force 提交派发 input 事件（队列满 queued=false）', () => {
+  const h = harness();
+  const ps = createPtySession({
+    session: h.session,
+    launch: () => ({ file: 'node', args: [], cwd: 'D:/w' }),
+    ptyFactory: () => ({ pid: 1, onData() {}, onExit() {}, write(s) { h.written.push(s); }, kill() {} }),
+    screenFactory: () => ({ write() {}, isReady: () => false, snapshot: () => '', inputLine: () => '', inInputBox: () => true, bracketedPaste: (t) => t, resize() {}, dispose() {} }),
+    queueFactory: (o) => createQueue({ ...o, limit: 1 }),
+    log: { info() {}, warn() {}, error() {} },
+    onEvent: (e) => h.events.push(e),
+  });
+  ps.start();
+  ps.submitText('一', 'phone');
+  const first = h.session.lastInput;
+  ps.submitText('二', 'phone');
+  const evs = h.events.filter((e) => e.type === 'input');
+  assert.strictEqual(evs.length, 2);
+  assert.strictEqual(evs[0].queued, true);
+  assert.strictEqual(evs[0].input, first);
+  assert.strictEqual(evs[1].queued, false);
+  assert.strictEqual(evs[1].input, h.session.lastInput);
+});
+
+test('force 提交返回 queued 且派发 input（queued=false, forced=true）', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.setInBox(false);
+  const result = h.ps.submitText('照样发', 'phone', { force: true });
+  assert.strictEqual(result, 'queued');
+  const evs = h.events.filter((e) => e.type === 'input');
+  assert.strictEqual(evs.length, 1);
+  assert.strictEqual(evs[0].queued, false);
+  assert.strictEqual(evs[0].forced, true);
+  assert.strictEqual(evs[0].input, h.session.lastInput);
+});
+
+test('onPcKeys 收到换行也触发 pc-input，input 是完整 lastInput', () => {
+  const h = harness({ inputLine: '换行输入' });
+  h.ps.start(); h.ps._pollReady();
+  h.ps.onPcKeys('\n');
+  assert.strictEqual(h.written[0], '\n');
+  const evs = h.events.filter((e) => e.type === 'pc-input');
+  assert.strictEqual(evs.length, 1);
+  assert.strictEqual(evs[0].input, h.session.lastInput);
+  assert.deepStrictEqual(evs[0].input, { seq: 1, origin: 'pc', text: '换行输入', at: 1000 });
+  assert.strictEqual(evs[0].text, undefined);
+  assert.strictEqual(evs[0].seq, undefined);
+});
+
+test('lastInput 键序为 seq,origin,text,at（手机与电脑端一致）', () => {
+  const h = harness({ inputLine: 'pc 端' });
+  h.ps.start(); h.ps._pollReady();
+  h.ps.submitText('手机端', 'phone');
+  assert.deepStrictEqual(Object.keys(h.session.lastInput), ['seq', 'origin', 'text', 'at']);
+  h.ps.onPcKeys('\r');
+  assert.deepStrictEqual(Object.keys(h.session.lastInput), ['seq', 'origin', 'text', 'at']);
 });
