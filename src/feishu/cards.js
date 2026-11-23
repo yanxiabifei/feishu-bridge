@@ -2,12 +2,14 @@ const MAX_CARD_CHARS = 8000;
 const TAIL_CHARS = 1500;
 
 function truncate(text, limit = MAX_CARD_CHARS) {
-  if (text.length <= limit) return { text, truncated: false };
-  const head = text.slice(0, Math.max(0, limit - TAIL_CHARS));
-  const tail = text.slice(-TAIL_CHARS);
-  const omitted = Math.max(0, text.length - limit);
+  const value = String(text ?? '');
+  if (value.length <= limit) return { text: value, truncated: false };
+  const tailLen = Math.min(TAIL_CHARS, Math.max(0, limit));
+  const head = value.slice(0, Math.max(0, limit - tailLen));
+  const tail = tailLen > 0 ? value.slice(-tailLen) : '';
+  const omitted = Math.max(0, value.length - limit);
   return {
-    text: `${head}\n\n…（已截断 ${omitted} 字，完整内容见附件）\n\n${tail}`,
+    text: `${head}\n\n…（已截断 ${omitted} 字，完整内容请到电脑上看）\n\n${tail}`,
     truncated: true,
   };
 }
@@ -15,14 +17,17 @@ function truncate(text, limit = MAX_CARD_CHARS) {
 function card({ title, template = 'blue', elements }) {
   return {
     schema: '2.0',
-    config: { update_multi: true, wide_screen_mode: true },
+    config: { update_multi: true },
     header: { title: { tag: 'plain_text', content: title }, template },
     body: { elements },
   };
 }
 
+const escapeText = (s) => String(s ?? '').replace(/</g, '&#60;');
+const ZWSP = String.fromCharCode(0x200b);
+const neutralizeFences = (text) => String(text).replace(/`{3,}/g, (m) => m[0] + ZWSP + m.slice(1));
 const md = (content) => ({ tag: 'markdown', content });
-const note = (content) => ({ tag: 'markdown', content: `<font color='grey'>${content}</font>` });
+const note = (content) => ({ tag: 'markdown', content: `<font color='grey'>${escapeText(content)}</font>` });
 
 function footer({ agent, cwd }) {
   const bits = [];
@@ -38,7 +43,7 @@ function processingCard({ agent, prompt }) {
     title: '⏳ 正在处理…',
     template: 'blue',
     elements: elements(
-      md(truncate(prompt || '（无输入）', 2000).text),
+      md(escapeText(truncate(prompt || '（无输入）', 2000).text)),
       { tag: 'hr' },
       footer({ agent }),
     ),
@@ -51,7 +56,7 @@ function replyCard({ text, agent, cwd }) {
     title: truncated ? '✅ 回复（已截断）' : '✅ 回复',
     template: 'green',
     elements: elements(
-      md(body),
+      md(escapeText(body)),
       truncated ? note('内容过长已截断，完整输出请到电脑上看。') : null,
       footer({ agent, cwd }),
     ),
@@ -68,7 +73,7 @@ function screenCard({ text, reason }) {
     elements: elements(
       md(why),
       { tag: 'hr' },
-      md('```\n' + truncate(text || '（无画面）', 6000).text + '\n```'),
+      md('```\n' + neutralizeFences(escapeText(truncate(text || '（无画面）', 6000).text)) + '\n```'),
       {
         tag: 'button',
         text: { tag: 'plain_text', content: '仍然发送' },
@@ -84,7 +89,7 @@ function noticeCard({ title, text, template = 'grey' }) {
   return card({
     title,
     template,
-    elements: elements(text ? md(truncate(text).text) : null),
+    elements: elements(text ? md(escapeText(truncate(text).text)) : null),
   });
 }
 
@@ -92,7 +97,7 @@ function errorCard({ title, text }) {
   return card({
     title,
     template: 'red',
-    elements: elements(text ? md(truncate(text).text) : null),
+    elements: elements(text ? md(escapeText(truncate(text).text)) : null),
   });
 }
 
