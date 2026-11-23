@@ -153,3 +153,76 @@ test('getBotInfo 读顶层 bot 字段（该接口没有 data 包装）', async (
   assert.strictEqual(info.app_name, '飞书桥');
   assert.strictEqual(info.open_id, 'ou_bot');
 });
+
+test('公开接口暴露 sendMessage，且按规格 POST 消息', async () => {
+  const { api, calls } = apiWith(({ url }) => (
+    tokenRoute(url) || { code: 0, msg: 'ok', data: { message_id: 'om_pub' } }
+  ));
+  assert.strictEqual(typeof api.sendMessage, 'function');
+
+  const id = await api.sendMessage('oc_1', 'text', { text: 'hi' });
+  assert.strictEqual(id, 'om_pub');
+
+  const send = calls.find((c) => c.url.includes('/open-apis/im/v1/messages?'));
+  assert.ok(send);
+  assert.strictEqual(send.opts.method, 'POST');
+  assert.ok(send.url.endsWith('/open-apis/im/v1/messages?receive_id_type=chat_id'));
+  const body = JSON.parse(send.opts.body);
+  assert.deepStrictEqual(body, {
+    receive_id: 'oc_1',
+    msg_type: 'text',
+    content: JSON.stringify({ text: 'hi' }),
+  });
+  assert.strictEqual(typeof body.content, 'string');
+});
+
+test('token 并发合并：3 个方法同时调用只发 1 次 token 请求', async () => {
+  let releaseToken;
+  const tokenGate = new Promise((resolve) => { releaseToken = resolve; });
+  let tokenCalls = 0;
+  const businessUrls = [];
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes('/auth/v3/tenant_access_token/internal')) {
+      tokenCalls += 1;
+      await tokenGate;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 0, msg: 'ok', tenant_access_token: 't-1', expire: 7200 }),
+        text: async () => '',
+        arrayBuffer: async () => Buffer.from(''),
+      };
+    }
+    businessUrls.push(u);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, msg: 'ok', data: { message_id: 'om_c' } }),
+      text: async () => '',
+      arrayBuffer: async () => Buffer.from(''),
+    };
+  };
+  const api = createApi({ appId: 'cli_x', appSecret: 'sec', fetchImpl, now: () => 1_000_000 });
+
+  const pending = [
+    api.sendText('oc_1', 'a'),
+    api.getChat('oc_1'),
+    api.disbandChat('oc_1'),
+  ];
+  releaseToken();
+  await Promise.all(pending);
+
+  assert.strictEqual(tokenCalls, 1);
+  assert.strictEqual(businessUrls.length, 3);
+});
+
+test('token 在恰好 tokenExp - 60000 时刷新（边界）', async () => {
+  const { api, calls, advance } = apiWith(({ url }) => (
+    tokenRoute(url) || { code: 0, msg: 'ok', data: { message_id: 'om_1' } }
+  ));
+  await api.sendText('oc_1', 'a');
+  advance(7200 * 1000 - 60000); // now 恰好等于 tokenExp - 60000
+  await api.sendText('oc_1', 'b');
+  assert.strictEqual(calls.filter((c) => c.url.includes('tenant_access_token')).length, 2);
+});

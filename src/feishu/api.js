@@ -69,6 +69,8 @@ function createApi({
   };
 
   return {
+    sendMessage,
+
     sendText: (chatId, text) => sendMessage(chatId, 'text', { text }),
 
     sendCard: (chatId, card) => sendMessage(chatId, 'interactive', card),
