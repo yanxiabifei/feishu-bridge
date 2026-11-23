@@ -3,19 +3,46 @@ const path = require('node:path');
 const http = require('node:http');
 const { WebSocketServer } = require('ws');
 
+// handler 名白名单：日志 event/字段只用固定值，绝不拼接动态内容。
+const HANDLER_NAMES = new Set(['onHookStop', 'onClientOpen', 'onClientMessage']);
+
+// 错误日志走结构化字段，交给 createLogger 的 redactor 脱敏；
+// 日志自身（appendFileSync）可能因磁盘/权限失败抛错，必须吞掉，不能拖垮 daemon。
+function reportHandlerError(log, name, err) {
+  try {
+    const handler = HANDLER_NAMES.has(name) ? name : 'unknown';
+    let message;
+    try {
+      message = (err && err.message) || err;
+    } catch {
+      message = 'unknown error';
+    }
+    if (log && typeof log.warn === 'function') {
+      log.warn('ipc.handler_error', { handler, error: message });
+    }
+  } catch {
+    /* 日志失败不影响 daemon */
+  }
+}
+
 function safeInvoke(log, name, fn) {
   setImmediate(() => {
     let ret;
     try {
       ret = fn();
     } catch (err) {
-      if (log && log.warn) log.warn(`ipc: ${name} threw: ${(err && err.message) || err}`);
+      reportHandlerError(log, name, err);
       return;
     }
     if (ret && typeof ret.then === 'function') {
-      ret.then(undefined, (err) => {
-        if (log && log.warn) log.warn(`ipc: ${name} rejected: ${(err && err.message) || err}`);
-      });
+      try {
+        // Promise.resolve 会把“thenable 的 then 同步抛错”转成 rejection。
+        Promise.resolve(ret)
+          .then(undefined, (err) => reportHandlerError(log, name, err))
+          .catch(() => {});
+      } catch {
+        /* thenable 的 then 直接抛错也不能拖垮 daemon */
+      }
     }
   });
 }
@@ -90,19 +117,25 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile }) {
       const send = (ws, obj) => {
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
       };
+      let closing = null;
       resolve({
         port: actualPort,
         broadcast(obj) { for (const ws of clients) send(ws, obj); },
         send(ws, obj) { send(ws, obj); },
         close() {
-          return new Promise((done) => {
+          if (closing) return closing;
+          closing = new Promise((done) => {
             for (const ws of clients) ws.terminate();
             wss.close();
             server.close(() => {
-              if (ipcFile && fs.existsSync(ipcFile)) fs.unlinkSync(ipcFile);
-              done();
+              try {
+                if (ipcFile && fs.existsSync(ipcFile)) fs.unlinkSync(ipcFile);
+              } finally {
+                done();
+              }
             });
           });
+          return closing;
         },
       });
     });
