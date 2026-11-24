@@ -8415,6 +8415,20 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 24. **SDK 1.77.0 的日志开关有 falsy 陷阱（任务 13）。** `lib/index.js` 里是 `new LoggerProxy(params.loggerLevel || LoggerLevel.info, ...)`，`fatal = 0` 是 falsy，只设级别会被回落成 `info`，长连接一启动就往 stdout 打 `[info]: [ 'event-dispatch is ready' ]`。必须**同时**注入一个五方法 noop logger；`WSClient` 那边是解构默认值（只有 `undefined` 才回落），传 0 有效。测试要同时锁定「级别 = 0」和「注入了 logger」。
 
+25. **`turn-end` 必须先发，再 `releaseTurn()`（任务 20）。** `releaseTurn()` → `queue.release()` 会**同步**泵出下一条排队消息并紧接着发 `turn-start(B)`。若先释放再发 `turn-end(A)`，事件顺序会变成 `turn-start(A) → input(A) → input(B) → turn-start(B) → turn-end(A)`，A 的结束事件被排到 B 开始之后。正确顺序是 `emit({type:'turn-end'})` 在前、`releaseTurn()` 在后；`test/ptySession.test.js` 用 `types.slice(-2)` 锁死这个顺序。
+
+26. **Codex 的轮次结束是「静默推断」，不是事件（任务 20）。** Codex 0.166 没有 Stop hook，判定为：`status === 'running'` 且 `isReady()` 且 `inInputBox()` 且距最后一次写入 ≥ 1500 ms（`CODEX_MIN_TURN_MS`），且连续 3 次 200 ms 轮询稳定（`CODEX_SETTLE_POLLS`）。已知风险：**长时间只在思考/跑工具而不刷新画面的回合会被误判结束**。若真机出现，优先调大 `CODEX_MIN_TURN_MS` 或改用画面尾部变化探测；当前 `turn-end` 事件也不带 `seq`，manager 侧不做持久化（留给任务 22/组合时按需补）。
+
+27. **任务 16 的安全与竞态边界（已知、不阻断）。** ①主人校验是 fail-open：`config.ownerOpenId && senderOpenId && senderOpenId !== owner` 才拦截，`senderOpenId` 缺失时放行；真实事件路径上 `events.js` 保证 open_id 必存在，但 daemon 装配时必须校验 `ownerOpenId` 非空，否则所有人可用。②带附件的消息在 `await attachMedia`（下载/落盘）期间若会话恰好退出，`submitText` 返回 `'closed'` 后消息被静默丢弃，连「会话已停」提示都没有——纯文本路径无此窗口（守卫到写入之间无 await）。③未登记群的首条消息若带附件，附件会被丢弃（`createFromPhone` 不接收 media）。④同名文件类附件按原始 `file_name` 落盘，同会话连发两个 `report.md` 后者覆盖前者。
+
+28. **`setup` 的 `ws.close()` 只是「发起」不是「等完成」（任务 14）。** `finally { Promise.resolve(ws.close()).catch(() => {}) }` 已满足测试，但如果 `ws.start()` 同步抛错（SDK 内部非 Promise 路径），`finally` 里的调用仍可能同步抛并掩盖原始错误。装配阶段如需加固，改成 `Promise.resolve().then(() => ws.close()).catch(() => {})`；不影响验收。
+
+29. **任务 15 的两处小冗余（已知）。** ①`loadProjectsFn` 同时用了 `projects.default || config.defaultCwd` 和 `parseFirstMessage` 的 `defaultCwd` 兜底，两处等价，任一处失效仍有另一处，非缺陷。②`newId()` 用 `now()` + 随机 3 位，固定时钟（测试注入）下同毫秒创建多个会话理论可碰撞；真实时钟 + 创建走串行路径，实际不可达。
+
+30. **会话状态机的写入前置条件（任务 9）。** 只有 `idle` 才能写 PTY：`canWrite = status === 'idle' && screen.isReady() && screen.inInputBox()`；`starting` 期间到 `ready` 之前只能排队；`closed`/`disposed` 后 `submitText` 返回 `'closed'` 并 emit `input(rejected)`；`force` 是唯一绕过 `canWrite` 的入口（盲写护栏）。后续任务 18/19 改 `onPhoneMessage`/`restoreAll` 时不得改动这三条不变式。
+
+31. **其余实现期实测结论（任务 7/12/13）。** ①hook-stop 看门狗 `BUDGET_MS = 1500`（绝对兜底），llhttp 在请求行解析阶段对非法方法字符直接回 `400`，因此测试构造的畸形请求要用 `X` 而不是空格，才能命中应用层看门狗而非解析层。②屏幕就绪判定用的是底部 30 行「草稿窗口」+ `lastPromptIndex` 向右移动，往下滚动的长输出不会误判为「回到输入框」。③`WSClient` 的 `onError` 目前只进 SDK 自己的 logger，不路由到应用日志；长连接错误排障需看 `logs/` 之外的 stdout，属已知观测缺口。④富文本 `content_v2` 的 markdown 子集有限，`post` 里不要塞表格/嵌套列表，已按纯文本降级处理。
+
 ---
 
 ## 8. 计划完成状态
