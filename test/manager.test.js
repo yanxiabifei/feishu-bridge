@@ -823,3 +823,40 @@ test('restoreAll：落盘失败不中断恢复，其余会话照常标记', asyn
   const prompts = calls.filter((c) => c[0] === 'sendText' && c[2] === '电脑重启了，回一条消息我就接上。');
   assert.strictEqual(prompts.length, 2);
 });
+
+test('codex turn-end：把最近画面推回群里，电脑来源带 🖥 引言行', async () => {
+  const h = setup();
+  const rec = await h.manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 codex 写个快排' });
+  const ps = h.spawned[0];
+  ps.emit({ type: 'ready' });
+  ps.emit({ type: 'pc-input', input: { seq: 2, origin: 'pc', text: '帮我写快排', at: 2 } });
+  ps.emit({ type: 'turn-start', text: '帮我写快排' });
+  ps.screenText = 'def quicksort():\n    pass';
+  ps.emit({ type: 'turn-end' });
+  await h.manager._drain();
+
+  const card = h.calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  const body = JSON.stringify(card.body);
+  assert.ok(body.includes('你刚在电脑上问：帮我写快排'));
+  assert.ok(body.includes('def quicksort'));
+  assert.strictEqual(h.store.get(rec.id).status, 'idle');
+});
+
+test('onCardAction：full-screen 回最近 200 行画面', async () => {
+  const { manager, calls, spawned } = await started();
+  spawned[0].screenText = '第 1 行\n第 200 行';
+  await manager.onCardAction({ chatId: 'oc_1', openId: 'ou_me', action: { act: 'full-screen', lines: 200 } });
+
+  const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  assert.ok(card.header.title.content.includes('200'));
+  assert.ok(JSON.stringify(card.body).includes('第 200 行'));
+});
+
+test('onCardAction：会话已停时 full-screen 回提示', async () => {
+  const { manager, calls, spawned } = await started();
+  spawned[0].emit({ type: 'exit', code: 1 });
+  await manager._drain();
+
+  await manager.onCardAction({ chatId: 'oc_1', openId: 'ou_me', action: { act: 'full-screen' } });
+  assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('会话已经停了')));
+});

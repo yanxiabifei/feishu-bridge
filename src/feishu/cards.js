@@ -101,6 +101,32 @@ function errorCard({ title, text }) {
   });
 }
 
+function screenOutputCard({ lead, text, agent, cwd }) {
+  return card({
+    title: '🖥 Codex 输出',
+    template: 'turquoise',
+    elements: elements(
+      lead ? md(lead) : null,
+      md('```\n' + truncate(text || '（无画面）', 6000).text + '\n```'),
+      {
+        tag: 'button',
+        text: { tag: 'plain_text', content: '查看完整画面' },
+        type: 'default',
+        behaviors: [{ type: 'callback', value: { act: 'full-screen', lines: 200 } }],
+      },
+      footer({ agent, cwd }),
+    ),
+  });
+}
+
+function fullScreenCard({ text, lines }) {
+  return card({
+    title: `🖥 最近 ${lines} 行`,
+    template: 'turquoise',
+    elements: elements(md('```\n' + truncate(text || '（无画面）', 6000).text + '\n```')),
+  });
+}
+
 module.exports = {
   MAX_CARD_CHARS,
   card,
@@ -108,6 +134,8 @@ module.exports = {
   processingCard,
   replyCard,
   screenCard,
+  screenOutputCard,
+  fullScreenCard,
   noticeCard,
   errorCard,
 };

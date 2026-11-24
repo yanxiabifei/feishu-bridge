@@ -7,7 +7,7 @@ const cards = require('../feishu/cards');
 const { summarizeToolUse } = require('../agent/tools');
 
 // 这些事件才值得写盘和广播，'data' 是高频字节流，绝不能每条都存
-const PERSIST_EVENTS = new Set(['spawned', 'ready', 'turn-start', 'exit', 'input', 'pc-input', 'overflow']);
+const PERSIST_EVENTS = new Set(['spawned', 'ready', 'turn-start', 'turn-end', 'exit', 'input', 'pc-input', 'overflow']);
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -75,6 +75,7 @@ function createManager({
       record.resuming = false;   // 起来了就说明 --resume 没失败，崩溃不再走降级重建
     }
     else if (e.type === 'turn-start') record.status = 'running';
+    else if (e.type === 'turn-end' && record.status === 'running') record.status = 'idle';
     else if (e.type === 'exit' && record.status !== 'closing') record.status = 'error';
     if (e.type === 'input' || e.type === 'pc-input') record.lastInput = e.input || null;
 
@@ -105,6 +106,7 @@ function createManager({
       if (record.resuming) enqueueWork(() => retryWithoutResume(record));
       else enqueueWork(() => notifyCrash(record, e));
     }
+    if (e.type === 'turn-end') enqueueWork(() => pushScreenOutput(record));
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
     if (e.type === 'overflow') log.warn('队列已满', { sessionId: e.sessionId });
   }
@@ -372,6 +374,32 @@ function createManager({
     }
   }
 
+  // Codex 没有 Stop hook：轮次结束时把屏上最近画面推回群里当回复
+  async function pushScreenOutput(record) {
+    if (record.agent !== 'codex') return;
+    const ps = sessions.get(record.id);
+    if (!ps || ['error', 'closed', 'closing'].includes(record.status)) return;
+    let snap = '';
+    try {
+      snap = ps.screen.snapshot({ lines: 40 });
+    } catch (err) {
+      log.warn('取画面失败', { sessionId: record.id, message: String((err && err.message) || err) });
+      return;
+    }
+    const input = record.lastInput;
+    const fromPc = input && input.origin === 'pc' && String(input.text || '').trim();
+    const lead = fromPc
+      ? `🖥 你刚在电脑上问：${String(input.text).replace(/\s+/g, ' ').slice(0, 80)}`
+      : '🖥 这一轮跑完了：';
+    try {
+      await api.sendCard(record.chatId, cards.screenOutputCard({
+        lead, text: snap, agent: record.agent, cwd: record.cwd,
+      }));
+    } catch (err) {
+      log.warn('画面推送失败', { chatId: record.chatId, message: String((err && err.message) || err) });
+    }
+  }
+
   async function closeSession(sessionId, { reason = 'closed', notify = false } = {}) {
     const record = store.get(sessionId);
     if (!record) return;
@@ -456,6 +484,24 @@ function createManager({
     const act = action && action.act;
     if (act === 'force-send') {
       await onPhoneMessage({ chatId, text: '仍然发送', senderOpenId: openId || config.ownerOpenId });
+      return;
+    }
+    if (act === 'full-screen') {
+      const record = store.getByChat(chatId);
+      const ps = record ? sessions.get(record.id) : null;
+      if (!ps || ['error', 'closed', 'closing', 'interrupted'].includes(record.status)) {
+        await api.sendText(chatId, '会话已经停了，看不到完整画面了。');
+        return;
+      }
+      const lines = Math.min(Math.max(Number(action.lines) || 200, 40), 500);
+      let snap = '';
+      try {
+        snap = ps.screen.snapshot({ lines });
+      } catch (err) {
+        log.warn('取画面失败', { chatId, message: String((err && err.message) || err) });
+        return;
+      }
+      await api.sendCard(chatId, cards.fullScreenCard({ text: snap, lines }));
       return;
     }
     log.warn('未知的卡片操作', { chatId, act });
