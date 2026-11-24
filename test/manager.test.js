@@ -334,3 +334,24 @@ test('onPhoneMessage：会话已停 → 提示「重来」，不写入', async (
   assert.strictEqual(spawned[0].submitted.length, 0);
   assert.ok(calls.some((c) => c[0] === 'sendText' && /重来/.test(c[2])));
 });
+
+test('onPhoneMessage：普通消息会清掉待确认的旧文本，「仍然发送」不会复活它', async () => {
+  const { manager, spawned } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+
+  // 先被护栏拦下，暂存「继续」
+  spawned[0].confirm = true;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+  assert.strictEqual(spawned[0].submitted.length, 0);
+
+  // 护栏解除后发一条普通消息：应正常入队，并清掉暂存
+  spawned[0].confirm = false;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '先做别的', senderOpenId: 'ou_me' });
+
+  // 再发「仍然发送」：此时没有待确认文本，不能被当成强写指令把「继续」塞进去
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
+
+  const texts = spawned[0].submitted.map((s) => s.text);
+  assert.deepStrictEqual(texts, ['先做别的', '仍然发送']);
+  assert.ok(!spawned[0].submitted.some((s) => s.force === true));
+});
