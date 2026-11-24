@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const net = require('node:net');
 const { spawn } = require('node:child_process');
 
 const SCRIPT = path.resolve(__dirname, '..', 'bin', 'hook-stop.js');
@@ -86,7 +87,8 @@ test('把 stdin 原样 POST 到 /hook/stop 并带 token，退出码 0', { timeou
 
   assert.strictEqual(r.killed, false);
   assert.strictEqual(r.code, 0);
-  assert.ok(r.elapsed < 2500, `耗时 ${r.elapsed}ms 超过 2500ms`);
+  t.diagnostic(`正常响应实测 ${r.elapsed}ms`);
+  assert.ok(r.elapsed < 2000, `耗时 ${r.elapsed}ms 超过 2000ms`);
   assertSilent(r, token);
 
   assert.strictEqual(received.length, 1);
@@ -110,7 +112,8 @@ test('端口无人监听时也退出 0 且不超时太久', { timeout: 5000 }, a
   const r = await runHook({ FEISHU_BRIDGE_IPC: ipc }, '{}');
   assert.strictEqual(r.killed, false);
   assert.strictEqual(r.code, 0);
-  assert.ok(r.elapsed < 2500, `耗时 ${r.elapsed}ms 超过 2500ms`);
+  t.diagnostic(`连接被拒绝实测 ${r.elapsed}ms`);
+  assert.ok(r.elapsed < 2000, `耗时 ${r.elapsed}ms 超过 2000ms`);
   assertSilent(r, 'tok-secret-refused');
 });
 
@@ -125,7 +128,8 @@ test('服务端接受连接但永不响应时仍退出 0 且不超时太久', { 
   const r = await runHook({ FEISHU_BRIDGE_IPC: ipc }, '{}');
   assert.strictEqual(r.killed, false);
   assert.strictEqual(r.code, 0);
-  assert.ok(r.elapsed < 2500, `耗时 ${r.elapsed}ms 超过 2500ms`);
+  t.diagnostic(`永不响应实测 ${r.elapsed}ms`);
+  assert.ok(r.elapsed < 2000, `耗时 ${r.elapsed}ms 超过 2000ms`);
   assertSilent(r, token);
 });
 
@@ -145,6 +149,47 @@ test('发完响应头后慢速滴字节时仍退出 0 且不超时太久', { tim
   const r = await runHook({ FEISHU_BRIDGE_IPC: ipc }, '{}');
   assert.strictEqual(r.killed, false);
   assert.strictEqual(r.code, 0);
-  assert.ok(r.elapsed < 2500, `耗时 ${r.elapsed}ms 超过 2500ms`);
+  t.diagnostic(`响应头后滴字节实测 ${r.elapsed}ms`);
+  assert.ok(r.elapsed < 2000, `耗时 ${r.elapsed}ms 超过 2000ms`);
+  assertSilent(r, token);
+});
+
+test('响应头始终不完整且对端持续有字节时，只有看门狗能让进程退出', { timeout: 5000 }, async (t) => {
+  const token = 'tok-secret-watchdog';
+  const sockets = new Set();
+  let drip;
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => {
+      sockets.delete(socket);
+      clearInterval(drip);
+    });
+    socket.on('error', () => {});
+    socket.resume();
+    // 只写状态行和响应头，绝不写结尾空行：HTTP 响应头永远不完整，
+    // 客户端的 response 回调永远不会触发。
+    socket.write('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n');
+    // 每 500ms 滴一个字节，socket 始终有活动，inactivity timeout 永不触发。
+    // 必须是合法 header token 字符（如 'X'）：空格会让 llhttp 立刻报
+    // "Unexpected whitespace after header value"，客户端会提前退出，
+    // 那样这条用例就测不到看门狗了。
+    drip = setInterval(() => {
+      if (!socket.destroyed) socket.write('X');
+    }, 500);
+  });
+  const port = await new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+  });
+  t.after(() => {
+    clearInterval(drip);
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  });
+  const ipc = makeIpc(t, { port, token, pid: 1 });
+  const r = await runHook({ FEISHU_BRIDGE_IPC: ipc }, '{}');
+  t.diagnostic(`仅有看门狗可退出实测 ${r.elapsed}ms`);
+  assert.strictEqual(r.killed, false);
+  assert.strictEqual(r.code, 0);
+  assert.ok(r.elapsed < 2000, `耗时 ${r.elapsed}ms 超过 2000ms`);
   assertSilent(r, token);
 });

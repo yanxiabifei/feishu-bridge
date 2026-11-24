@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 
-const BUDGET_MS = 1800;
+const BUDGET_MS = 1500;
 const startedAt = Date.now();
 
 function readStdin() {
