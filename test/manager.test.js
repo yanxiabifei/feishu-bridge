@@ -769,3 +769,21 @@ test('interrupted 状态回「重来」：直接重启，不把「重来」当�
   assert.strictEqual(spawned.length, 2);
   assert.strictEqual(spawned[1].submitted.length, 0);
 });
+
+test('resume 成功启动后再崩溃：按普通崩溃处理，不丢会话 ID', async () => {
+  const { manager, store, calls, spawned, rec } = await started();
+  rec.claudeSessionId = 'cs_1';
+  store.save();
+  await manager.restoreAll();
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  spawned[1].emit({ type: 'ready' });
+  await manager._drain();
+  spawned[1].emit({ type: 'exit', code: 1 });
+  await manager._drain();
+
+  assert.strictEqual(store.get(rec.id).claudeSessionId, 'cs_1');
+  assert.strictEqual(spawned.length, 2);
+  assert.ok(calls.some((c) => c[0] === 'sendCard' && c[2].header.title.content.includes('进程异常退出')));
+  assert.ok(!calls.some((c) => c[0] === 'sendText' && c[2].includes('改用新会话重建')));
+});

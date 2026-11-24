@@ -70,7 +70,10 @@ function createManager({
     const record = store.get(e.sessionId);
     if (!record) return;
     if (e.type === 'spawned') record.ptyPid = e.pid || null;
-    else if (e.type === 'ready') record.status = 'idle';
+    else if (e.type === 'ready') {
+      record.status = 'idle';
+      record.resuming = false;   // 起来了就说明 --resume 没失败，崩溃不再走降级重建
+    }
     else if (e.type === 'turn-start') record.status = 'running';
     else if (e.type === 'exit' && record.status !== 'closing') record.status = 'error';
     if (e.type === 'input' || e.type === 'pc-input') record.lastInput = e.input || null;
