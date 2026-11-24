@@ -8441,6 +8441,8 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 37. **任务 19 复审后的补充与已知非阻塞项。** ①实现期自查发现 `record.resuming` 在 `--resume` 成功后从未复位：恢复成功的会话再崩溃会被误判成 resume 失败，静默丢掉 `claudeSessionId` 并提示「会话记录不在了」。已在 `ready` 分支清 `resuming`，并补回归用例（删掉该行即 FAIL）。②规格审查发现规格自相矛盾：`onPhoneMessage` 的「已停」守卫（`!ps || ['error','closed','closing']`）排在 `interrupted` 恢复分支之前，真实 daemon 重启后内存 `sessions` 为空，`!ps` 恒真，普通消息永远走不到 `revive`；原用例因假 PTY 残留在 `sessions` 里而假绿。已把 interrupted 分支前置（条件 `record.status === 'interrupted' && !ps`），并把 5 个用例改成 `_sessions.clear()` 模拟真实重启。③质量审查另补三处：`retryWithoutResume` 改为先 `spawn` 再 `await sendText`（否则 await 窗口内用户消息会写进已退出的旧 PTY 而丢失，期间记录被删还会留下孤儿进程），并加 `store.get(record.id) !== record` 存活守卫；`restoreAll` 的 `store.remove`/`store.save` 包 try/catch（磁盘异常不再中断启动恢复，补了「落盘失败不中断」用例）；删掉 `retryWithoutResume(record, e)` 的无意义第二实参。④残余：`notifyCrash` 没有同款存活守卫（仅当排队后记录被删才可能误发崩溃卡）；`restoreAll` 假设内存 `sessions` 为空，热重载场景会静默拒绝，而 daemon 目前只在冷启动调用；`_sessions.clear()` 只是重启近似，更真实的 e2e 应新建 manager + 预置 store；`revive()` 里 `spawn` 之后的 `sendText` 仍未包 try/catch（与第 36 条②同源）。
 
+38. **任务 21 复审后收紧 codex 识别（偏离计划原文，已改）。** 计划给出的 `AGENT_LEAD`/`AGENT_VERB` 无词边界、VERB 不锚句首，且 VERB 分支 `.replace(/\s+/g,' ')` 会压掉 prompt 换行。质量审查实测三个反例：`'这个功能用 codex 实现过'` 被判为指定、`'codexwriter 是什么'`/`'codex-cli 怎么装'` 被判为指定、多行 prompt 的换行丢失。已改为：两个正则都在 `codex` 后加 `(?![A-Za-z0-9_-])`，`AGENT_VERB` 加 `^\s*` 锚定；VERB 分支只 `.trim()`。别名/路径分支剥前缀后正文本身以「用 codex」开头，原 11 条用例全绿。已知边界（可接受）：default 分支前导中文标点（`'，用 codex 写'`）不识别，属既有 SEP 处理范围外；`'用 codex-1号 写'` 因 lookahead 不识别。测试新增 4 条（句中提及、`codexwriter`/`codex-cli`、换行保留、`codex，` 防回归）；router 15、manager 57、全量 284。
+
 ---
 
 ## 8. 计划完成状态
