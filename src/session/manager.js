@@ -72,7 +72,7 @@ function createManager({
     if (e.type === 'spawned') record.ptyPid = e.pid || null;
     else if (e.type === 'ready') record.status = 'idle';
     else if (e.type === 'turn-start') record.status = 'running';
-    else if (e.type === 'exit') record.status = 'error';
+    else if (e.type === 'exit' && record.status !== 'closing') record.status = 'error';
     if (e.type === 'input' || e.type === 'pc-input') record.lastInput = e.input || null;
 
     if (e.type === 'data') {
@@ -98,6 +98,7 @@ function createManager({
       const turn = record.turnSeq;
       enqueueWork(() => startProcessingCard(record, e, turn));
     }
+    if (e.type === 'exit' && record.status === 'error') enqueueWork(() => notifyCrash(record, e));
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
     if (e.type === 'overflow') log.warn('队列已满', { sessionId: e.sessionId });
   }
@@ -353,6 +354,123 @@ function createManager({
     store.save();
   }
 
+  async function notifyCrash(record, e) {
+    const code = typeof e.code === 'number' ? `（code ${e.code}）` : '';
+    try {
+      await api.sendCard(record.chatId, cards.errorCard({
+        title: '进程异常退出',
+        text: `会话进程异常退出${code}。\n\n回复「重来」，我用 --resume 接着干。`,
+      }));
+    } catch (err) {
+      log.warn('崩溃通知发送失败', { chatId: record.chatId, message: String((err && err.message) || err) });
+    }
+  }
+
+  async function closeSession(sessionId, { reason = 'closed', notify = false } = {}) {
+    const record = store.get(sessionId);
+    if (!record) return;
+
+    const ps = sessions.get(sessionId);
+    sessions.delete(sessionId);
+    record.status = 'closing';        // 先置 closing，kill 出来的 exit 事件不会被当成崩溃
+    store.save();
+    if (ps) {
+      try {
+        ps.kill();
+      } catch (err) {
+        log.warn('结束 PTY 失败', { sessionId, message: String((err && err.message) || err) });
+      }
+    }
+
+    record.status = 'closed';
+    record.closedReason = reason;
+    record.closedAt = new Date(now()).toISOString();
+    store.save();
+    ipc?.broadcast({ type: 'session', session: record });
+
+    if (notify) {
+      try {
+        await api.sendText(record.chatId, '会话已结束');
+      } catch (err) {
+        log.warn('会话结束提示发送失败', { chatId: record.chatId, message: String((err && err.message) || err) });
+      }
+    }
+    if (config.autoDisband && reason !== 'disbanded' && reason !== 'bot-removed') {
+      try {
+        await api.disbandChat(record.chatId);
+      } catch (err) {
+        log.warn('解散群失败', { chatId: record.chatId, message: String((err && err.message) || err) });
+      }
+    }
+
+    store.remove(sessionId);
+    store.save();
+  }
+
+  // 崩溃 / 已停的会话原地重启。hook 文件、--settings、信任标记、--resume
+  // 都在 launcher.buildLaunch 里按需重写，这里只管状态与目录校验。
+  async function revive(record) {
+    if (!fsApi.existsSync(record.cwd)) {
+      await api.sendCard(record.chatId, cards.errorCard({
+        title: '原目录不见了',
+        text: `\`${record.cwd}\` 已经不存在，没法恢复这个会话。改个目录重新开一个吧。`,
+      }));
+      return false;
+    }
+
+    record.status = 'starting';
+    record.error = null;
+    record.pendingCard = null;
+    record.lastActiveAt = new Date(now()).toISOString();
+    store.save();
+    spawn(record);
+    ipc?.broadcast({ type: 'session', session: record });
+
+    const resumed = record.agent === 'claude' && record.claudeSessionId;
+    await api.sendText(record.chatId, resumed ? '重新开起来了，接着上次的对话。' : '重新开起来了。');
+    return true;
+  }
+
+  async function onDisbanded({ chatId }) {
+    const record = store.getByChat(chatId);
+    if (!record) return;
+    await closeSession(record.id, { reason: 'disbanded', notify: false });
+  }
+
+  async function onBotRemoved({ chatId }) {
+    const record = store.getByChat(chatId);
+    if (!record) return;
+    await closeSession(record.id, { reason: 'bot-removed', notify: false });
+  }
+
+  async function onCardAction({ chatId, openId = null, action }) {
+    if (config.ownerOpenId && openId && openId !== config.ownerOpenId) {
+      log.warn('忽略非主人的卡片操作', { chatId });
+      return;
+    }
+    const act = action && action.act;
+    if (act === 'force-send') {
+      await onPhoneMessage({ chatId, text: '仍然发送', senderOpenId: openId || config.ownerOpenId });
+      return;
+    }
+    log.warn('未知的卡片操作', { chatId, act });
+  }
+
+  // 由 daemon 每 30s 调一次（任务 21 装配时起定时器）：兜住丢失的解散事件。
+  async function tick() {
+    for (const record of store.all()) {
+      if (record.status === 'closed') continue;
+      let chat;
+      try {
+        chat = await api.getChat(record.chatId);
+      } catch (err) {
+        log.warn('抽检群失败', { chatId: record.chatId, message: String((err && err.message) || err) });
+        continue;
+      }
+      if (!chat) await closeSession(record.id, { reason: 'disbanded', notify: false });
+    }
+  }
+
   // 文件名只留安全字符，截断到 120 字符以内（Windows 路径上限）
   function safeName(name) {
     const base = String(name || 'file').replace(/[\\/:*?"<>|]/g, '_').trim();
@@ -390,6 +508,13 @@ function createManager({
     }
 
     const ps = sessions.get(record.id);
+    let payload = String(text == null ? '' : text).trim();
+
+    if (payload === '重来' && (!ps || record.status === 'error')) {
+      await revive(record);
+      return;
+    }
+
     if (!ps || ['error', 'closed', 'closing'].includes(record.status)) {
       await api.sendText(chatId, '这个会话已经停了，回复「重来」重新开一轮。');
       return;
@@ -398,8 +523,6 @@ function createManager({
       await api.sendText(chatId, '电脑重启过，这个会话还没接上。再发一次，我就用 --resume 接着干。');
       return;
     }
-
-    let payload = String(text == null ? '' : text).trim();
 
     const pending = forcePending.get(chatId);
     if (pending && payload === '仍然发送') {
@@ -432,6 +555,12 @@ function createManager({
     createFromPc,
     onPhoneMessage,
     onHookStop,
+    closeSession,
+    onDisbanded,
+    onBotRemoved,
+    onCardAction,
+    tick,
+    revive,
     _drain: drainWork,
     _sessions: sessions,
   };
