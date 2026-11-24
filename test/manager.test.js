@@ -355,3 +355,152 @@ test('onPhoneMessage：普通消息会清掉待确认的旧文本，「仍然发
   assert.deepStrictEqual(texts, ['先做别的', '仍然发送']);
   assert.ok(!spawned[0].submitted.some((s) => s.force === true));
 });
+
+async function started(props) {
+  const h = setup(props);
+  const rec = await h.manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 你好' });
+  h.spawned[0].emit({ type: 'ready' });
+  return { ...h, rec };
+}
+
+test('Stop：手机来源只推回复，不重复用户输入', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'input', input: { seq: 1, origin: 'phone', text: '现在几点', at: 1 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '十点半。' } });
+
+  const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  const body = JSON.stringify(card.body);
+  assert.ok(body.includes('十点半。'));
+  assert.ok(!body.includes('你刚在电脑上问'));
+  assert.ok(!body.includes('现在几点'));
+});
+
+test('Stop：电脑来源顶部带 🖥 行', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'pc-input', input: { seq: 2, origin: 'pc', text: '现在几点', at: 2 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '十点半。' } });
+
+  const body = JSON.stringify(calls.filter((c) => c[0] === 'sendCard').at(-1)[2].body);
+  assert.ok(body.includes('🖥 你刚在电脑上问：现在几点'));
+  assert.ok(body.includes('十点半。'));
+});
+
+test('Stop：输入为空（只按了回车）不推', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  const before = calls.filter((c) => c[0] === 'sendCard').length;
+  spawned[0].emit({ type: 'input', input: { seq: 1, origin: 'phone', text: '   ', at: 1 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '好的' } });
+  assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, before);
+});
+
+test('Stop：斜杠命令同样作为电脑来源推回', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'pc-input', input: { seq: 2, origin: 'pc', text: '/compact', at: 2 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '已压缩 12 条消息' } });
+
+  const body = JSON.stringify(calls.filter((c) => c[0] === 'sendCard').at(-1)[2].body);
+  assert.ok(body.includes('🖥 你刚在电脑上问：/compact'));
+});
+
+test('Stop：超过 8000 字的回复走截断', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'input', input: { seq: 1, origin: 'phone', text: '写长一点', at: 1 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '字'.repeat(9000) } });
+
+  const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  assert.strictEqual(card.header.title.content, '✅ 回复（已截断）');
+});
+
+test('Stop：正文带上工具摘要行', async () => {
+  const jsonl = [
+    JSON.stringify({ type: 'user', message: { content: '改地形' } }),
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', name: 'Edit', input: { file_path: 'D:/card/a.gd' } },
+          { type: 'tool_use', name: 'Edit', input: { file_path: 'D:/card/b.gd' } },
+          { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } },
+        ],
+      },
+    }),
+  ].join('\n');
+  const { manager, calls, spawned, rec } = await started({
+    fsApi: {
+      existsSync: () => true,
+      mkdirSync() {},
+      statSync: () => ({ size: jsonl.length }),
+      readFileSync: () => jsonl,
+    },
+  });
+  spawned[0].emit({ type: 'input', input: { seq: 1, origin: 'phone', text: '改地形', at: 1 } });
+  await manager.onHookStop({
+    sessionId: rec.id,
+    payload: { transcript_path: 'D:/t.jsonl', last_assistant_message: '改好了' },
+  });
+
+  const body = JSON.stringify(calls.filter((c) => c[0] === 'sendCard').at(-1)[2].body);
+  assert.ok(body.includes('改了 2 个文件'));
+  assert.ok(body.includes('Bash×1'));
+});
+
+test('Stop：画面停在 Interrupted 且没有正文 → 推「（已打断）」', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].screenText = '⎿  Interrupted · What should Claude do instead?';
+  spawned[0].emit({ type: 'input', input: { seq: 1, origin: 'pc', text: '跑很久的任务', at: 1 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '' } });
+
+  const body = JSON.stringify(calls.filter((c) => c[0] === 'sendCard').at(-1)[2].body);
+  assert.ok(body.includes('（已打断）'));
+});
+
+test('turn-start 建处理中卡片，Stop 原地定稿', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 2, origin: 'phone', text: '跑测试' });
+  await manager._drain();
+
+  assert.ok(calls.some((c) => c[0] === 'createCardEntity'));
+  assert.ok(calls.some((c) => c[0] === 'sendCardEntity' && c[2] === 'card_1'));
+
+  spawned[0].emit({ type: 'input', input: { seq: 2, origin: 'phone', text: '跑测试', at: 2 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '全绿' } });
+
+  const upd = calls.find((c) => c[0] === 'updateCardEntity');
+  assert.strictEqual(upd[1], 'card_1');
+  assert.strictEqual(upd[2], 1);
+  assert.ok(JSON.stringify(upd[3].body).includes('全绿'));
+  assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, 1);   // 只有「已开工」
+});
+
+test('Stop：回填 claudeSessionId 与 transcriptPath，状态转 idle', async () => {
+  const { manager, store, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 2, origin: 'phone', text: '一' });
+  await manager._drain();
+  assert.strictEqual(store.get(rec.id).status, 'running');
+
+  await manager.onHookStop({
+    sessionId: rec.id,
+    payload: { session_id: 'cs_9', transcript_path: 'D:/t.jsonl', last_assistant_message: '完' },
+  });
+
+  const saved = store.get(rec.id);
+  assert.strictEqual(saved.claudeSessionId, 'cs_9');
+  assert.strictEqual(saved.transcriptPath, 'D:/t.jsonl');
+  assert.strictEqual(saved.status, 'idle');
+});
+
+test('Stop：桥梁 sessionId 对不上时，用 payload.session_id 兜底找会话', async () => {
+  const { manager, calls, store, spawned, rec } = await started();
+  store.get(rec.id).claudeSessionId = 'cs_1';
+  spawned[0].emit({ type: 'input', input: { seq: 1, origin: 'phone', text: '一', at: 1 } });
+  await manager.onHookStop({ sessionId: 's_unknown', payload: { session_id: 'cs_1', last_assistant_message: '找到了' } });
+
+  const body = JSON.stringify(calls.filter((c) => c[0] === 'sendCard').at(-1)[2].body);
+  assert.ok(body.includes('找到了'));
+});
+
+test('Stop：找不到任何会话时静默返回', async () => {
+  const { manager, calls } = setup();
+  await manager.onHookStop({ sessionId: 's_none', payload: { last_assistant_message: '幽灵' } });
+  assert.strictEqual(calls.length, 0);
+});

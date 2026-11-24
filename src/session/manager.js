@@ -4,6 +4,7 @@ const { parseFirstMessage } = require('./router');
 const { loadProjects } = require('../projects');
 const paths = require('../paths');
 const cards = require('../feishu/cards');
+const { summarizeToolUse } = require('../agent/tools');
 
 // 这些事件才值得写盘和广播，'data' 是高频字节流，绝不能每条都存
 const PERSIST_EVENTS = new Set(['spawned', 'ready', 'turn-start', 'exit', 'input', 'pc-input', 'overflow']);
@@ -36,6 +37,15 @@ function createManager({
 }) {
   const sessions = new Map();
   const forcePending = new Map();   // chatId -> { text }：被护栏拦下、等「仍然发送」的那句
+  const TOOL_SUMMARY_MAX_BYTES = 20 * 1024 * 1024;
+  let pendingWork = Promise.resolve();
+
+  function enqueueWork(fn) {
+    pendingWork = pendingWork
+      .then(fn)
+      .catch((err) => log.warn('异步任务失败', { message: String((err && err.message) || err) }));
+    return pendingWork;
+  }
   const loadProjectsFn = getProjects
     || (() => loadProjects({ file: paths.PROJECTS, defaultCwd: config.defaultCwd }));
 
@@ -72,6 +82,7 @@ function createManager({
       }
       if (ipc && ipc.broadcast) ipc.broadcast({ type: 'session', session: record });
     }
+    if (e.type === 'turn-start') enqueueWork(() => startProcessingCard(record, e));
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
     if (e.type === 'overflow') log.warn('队列已满', { sessionId: e.sessionId });
   }
@@ -204,6 +215,92 @@ function createManager({
     return record;
   }
 
+  async function startProcessingCard(record, e) {
+    if (record.agent !== 'claude') return;      // Codex 不做卡片定稿，走画面推送（任务 20）
+    try {
+      const cardId = await api.createCardEntity(cards.processingCard({ agent: record.agent, prompt: e.text }));
+      await api.sendCardEntity(record.chatId, cardId);
+      record.pendingCard = { cardId, seq: 0, origin: e.origin, prompt: e.text };
+      store.save();
+    } catch (err) {
+      log.warn('处理中卡片发送失败，Stop 时改为新发一张', { message: String((err && err.message) || err) });
+    }
+  }
+
+  function toolSummary(record) {
+    if (!record.transcriptPath) return '';
+    try {
+      const st = fsApi.statSync(record.transcriptPath);
+      if (!st || st.size > TOOL_SUMMARY_MAX_BYTES) return '';
+      return summarizeToolUse(fsApi.readFileSync(record.transcriptPath, 'utf8'));
+    } catch {
+      return '';
+    }
+  }
+
+  function sawInterrupted(record) {
+    const ps = sessions.get(record.id);
+    if (!ps || !ps.screen) return false;
+    try {
+      return ps.screen.snapshot({ lines: 12 }).includes('Interrupted');
+    } catch {
+      return false;
+    }
+  }
+
+  function findByClaudeSessionId(claudeSessionId) {
+    if (!claudeSessionId) return null;
+    return store.all().find((s) => s.claudeSessionId === claudeSessionId) || null;
+  }
+
+  async function onHookStop({ sessionId, payload = {} }) {
+    const record = store.get(sessionId) || findByClaudeSessionId(payload.session_id);
+    if (!record) {
+      log.warn('Stop hook 找不到会话，忽略', { sessionId });
+      return;
+    }
+
+    // 回填 Claude 自己的会话信息：重启后 --resume 靠它（任务 19）
+    if (payload.session_id) record.claudeSessionId = payload.session_id;
+    if (payload.transcript_path) record.transcriptPath = payload.transcript_path;
+    if (!['error', 'closed', 'closing'].includes(record.status)) record.status = 'idle';
+    // ptySession 内部状态也要回到 idle，否则 canWrite 永远为 false，队列里的手机消息再也写不进去
+    const stoppedPs = sessions.get(record.id);
+    if (stoppedPs) stoppedPs.releaseTurn();
+    record.lastActiveAt = new Date(now()).toISOString();
+    store.save();
+    ipc?.broadcast({ type: 'session', session: record });
+
+    const input = record.lastInput;
+    if (input && !String(input.text || '').trim()) return;   // 只按了回车，不推
+
+    const reply = String(payload.last_assistant_message || '').trim();
+    const interrupted = sawInterrupted(record);
+    if (!reply && !interrupted) return;
+
+    const parts = [];
+    if (input && input.origin === 'pc' && input.text) parts.push(`🖥 你刚在电脑上问：${input.text}`);
+    parts.push(interrupted && !reply ? '（已打断）' : reply);
+    const tools = toolSummary(record);
+    if (tools) parts.push(tools);
+
+    const card = cards.replyCard({ text: parts.join('\n\n'), agent: record.agent, cwd: record.cwd });
+    const pending = record.pendingCard;
+    record.pendingCard = null;
+
+    if (pending && pending.cardId) {
+      try {
+        await api.updateCardEntity(pending.cardId, card, pending.seq + 1);
+        store.save();
+        return;
+      } catch (err) {
+        log.warn('卡片定稿失败，改为新发一张', { message: String((err && err.message) || err) });
+      }
+    }
+    await api.sendCard(record.chatId, card);
+    store.save();
+  }
+
   // 文件名只留安全字符，截断到 120 字符以内（Windows 路径上限）
   function safeName(name) {
     const base = String(name || 'file').replace(/[\\/:*?"<>|]/g, '_').trim();
@@ -282,6 +379,8 @@ function createManager({
     createFromPhone,
     createFromPc,
     onPhoneMessage,
+    onHookStop,
+    _drain: () => pendingWork,
     _sessions: sessions,
   };
 }
