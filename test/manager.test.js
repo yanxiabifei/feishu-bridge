@@ -702,3 +702,70 @@ test('closeSession：主动关闭不会误报进程崩溃', async () => {
   assert.ok(!calls.some((c) => c[0] === 'sendCard' && c[2].header.title.content.includes('进程异常退出')));
   assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('会话已结束')));
 });
+
+test('restoreAll：记录转 interrupted、逐群提示、不拉起 PTY', async () => {
+  const { manager, store, calls, spawned, rec } = await started();
+
+  const n = await manager.restoreAll();
+
+  assert.strictEqual(n, 1);
+  assert.strictEqual(store.get(rec.id).status, 'interrupted');
+  assert.strictEqual(spawned.length, 1);
+  assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('电脑重启了')));
+});
+
+test('restoreAll：closed 的记录直接清掉', async () => {
+  const { manager, store } = setup();
+  store.upsert({ id: 's_old', chatId: 'oc_9', status: 'closed', agent: 'claude', cwd: 'D:/w' });
+
+  await manager.restoreAll();
+
+  assert.strictEqual(store.get('s_old'), null);
+});
+
+test('interrupted 会话收到消息：重开并投递这条消息', async () => {
+  const { manager, spawned } = await started();
+  await manager.restoreAll();
+
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '接着干', senderOpenId: 'ou_me' });
+
+  assert.strictEqual(spawned.length, 2);
+  assert.deepStrictEqual(spawned[1].submitted.at(-1), { text: '接着干', origin: 'phone' });
+});
+
+test('interrupted + claudeSessionId：重开带着它（--resume 由 launcher 加）', async () => {
+  const { manager, store, spawned, rec } = await started();
+  rec.claudeSessionId = 'cs_1';
+  store.save();
+  await manager.restoreAll();
+
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  assert.strictEqual(spawned[1].session.claudeSessionId, 'cs_1');
+  assert.strictEqual(spawned[1].session.resuming, true);
+});
+
+test('--resume 失败：清掉旧会话 ID，改用新会话重建', async () => {
+  const { manager, store, calls, spawned, rec } = await started();
+  rec.claudeSessionId = 'cs_1';
+  store.save();
+  await manager.restoreAll();
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  spawned[1].emit({ type: 'exit', code: 1 });
+  await manager._drain();
+
+  assert.strictEqual(store.get(rec.id).claudeSessionId, null);
+  assert.strictEqual(spawned.length, 3);
+  assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('改用新会话重建')));
+});
+
+test('interrupted 状态回「重来」：直接重启，不把「重来」当提示词', async () => {
+  const { manager, spawned } = await started();
+  await manager.restoreAll();
+
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
+
+  assert.strictEqual(spawned.length, 2);
+  assert.strictEqual(spawned[1].submitted.length, 0);
+});
