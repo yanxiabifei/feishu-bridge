@@ -94,6 +94,7 @@ function createPtySession({
       env: { ...process.env, FORCE_COLOR: '1', TERM: 'xterm-256color' },
     });
     pty.onData((d) => {
+      if (disposed) return;
       screen.write(d);
       emit({ type: 'data', data: d });
     });
@@ -105,7 +106,7 @@ function createPtySession({
 
   function submitText(text, origin, { force = false } = {}) {
     if (disposed || status === 'closed') {
-      emit({ type: 'input', origin, text, queued: false });
+      emit({ type: 'input', input: session.lastInput, queued: false, rejected: true, reason: 'closed' });
       return 'closed';
     }
     const seq = session.inputSeq + 1;
@@ -126,6 +127,7 @@ function createPtySession({
   function onPcKeys(data) {
     if (disposed || status === 'closed' || !pty) return;
     pty.write(data);
+    if (status === 'starting') return;
     if (data.includes('\r') || data.includes('\n')) {
       const seq = session.inputSeq + 1;
       session.inputSeq = seq;

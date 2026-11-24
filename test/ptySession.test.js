@@ -6,6 +6,7 @@ const { createQueue } = require('../src/session/queue');
 function harness(overrides = {}) {
   const written = [];
   const events = [];
+  const order = [];
   const launchCalls = [];
   const factoryCalls = [];
   let dataHandler = () => {};
@@ -21,7 +22,7 @@ function harness(overrides = {}) {
   };
 
   const screen = {
-    write(d) { lastScreen += d; },
+    write(d) { lastScreen += d; order.push('screen'); },
     isReady: () => ready,
     snapshot: () => 'screen-tail',
     inputLine: () => overrides.inputLine || '输入中的话',
@@ -50,12 +51,12 @@ function harness(overrides = {}) {
     screenFactory: () => screen,
     queueFactory: createQueue,
     log: { info() {}, warn() {}, error() {} },
-    onEvent: (e) => events.push(e),
+    onEvent: (e) => { events.push(e); order.push('event'); },
     now: () => 1000,
   });
 
   return {
-    ps, written, events, session, launchCalls, factoryCalls,
+    ps, written, events, order, session, launchCalls, factoryCalls,
     screenText() { return lastScreen; },
     setReady(v) { ready = v; },
     setInBox(v) { inBox = v; },
@@ -371,4 +372,132 @@ test('lastInput 键序为 seq,origin,text,at（手机与电脑端一致）', () 
   assert.deepStrictEqual(Object.keys(h.session.lastInput), ['seq', 'origin', 'text', 'at']);
   h.ps.onPcKeys('\r');
   assert.deepStrictEqual(Object.keys(h.session.lastInput), ['seq', 'origin', 'text', 'at']);
+});
+
+// ---- 关闭态 input 事件契约 ----
+
+test('关闭态提交派发 input 事件保留上一条 lastInput 且标记 rejected', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.ps.submitText('第一条', 'phone');
+  const valid = h.session.lastInput;
+  h.ps.kill();
+  const result = h.ps.submitText('迟到的话', 'phone');
+  assert.strictEqual(result, 'closed');
+  const evs = h.events.filter((e) => e.type === 'input');
+  assert.strictEqual(evs.length, 2);
+  const rejected = evs[1];
+  assert.strictEqual(rejected.input, valid);
+  assert.strictEqual(rejected.queued, false);
+  assert.strictEqual(rejected.rejected, true);
+  assert.strictEqual(rejected.reason, 'closed');
+  assert.strictEqual(h.session.lastInput, valid);
+});
+
+// ---- starting 期间按键不得推进状态 ----
+
+test('starting 期间 onPcKeys 回车透传但不推进状态，随后仍能 emit 一次 ready', () => {
+  const h = harness();
+  h.ps.start();
+  h.ps.onPcKeys('\r');
+  assert.strictEqual(h.ps.status, 'starting');
+  assert.deepStrictEqual(h.written, ['\r']);
+  assert.strictEqual(h.events.filter((e) => e.type === 'pc-input').length, 0);
+  assert.strictEqual(h.session.lastInput, null);
+  h.ps._pollReady();
+  assert.strictEqual(h.ps.status, 'idle');
+  assert.strictEqual(h.events.filter((e) => e.type === 'ready').length, 1);
+});
+
+// ---- disposed 后不再派发 data（F4 / 变异 8） ----
+
+test('进程退出后 PTY 再输出不产生 data 事件', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.emitExit(0);
+  h.emitData('退出后的输出');
+  assert.strictEqual(h.events.filter((e) => e.type === 'data').length, 0);
+  assert.strictEqual(h.screenText(), '');
+});
+
+// ---- 变异 1：snapshot().pending 必须用 pending() 而非 size() ----
+
+test('snapshot().pending 只统计排队项，不含正在写入的 turn', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.ps.submitText('一', 'phone');
+  assert.strictEqual(h.ps._queue.inFlight(), true);
+  assert.strictEqual(h.ps.snapshot().pending, 0);
+  assert.strictEqual(h.ps._queue.size(), 1);
+  h.ps.submitText('二', 'phone');
+  assert.strictEqual(h.ps.snapshot().pending, 1);
+  assert.strictEqual(h.ps._queue.size(), 2);
+});
+
+// ---- 变异 2：releaseTurn 的 status !== 'running' 守卫 ----
+
+test('releaseTurn 在非 running 状态不改写队列', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.ps.submitText('一', 'phone');
+  h.setInBox(false);
+  h.ps.submitText('二', 'phone');
+  h.ps.releaseTurn(); // running→idle，但画面不在输入框，不写
+  assert.strictEqual(h.ps.status, 'idle');
+  assert.strictEqual(h.written.length, 1);
+  h.setInBox(true);
+  h.ps.releaseTurn(); // idle 状态下调用，守卫应直接返回、不写
+  assert.strictEqual(h.written.length, 1);
+  assert.strictEqual(h.ps._queue.pending(), 1);
+});
+
+// ---- 变异 3：env 必须继承宿主环境变量 ----
+
+test('ptyFactory 的 env 继承宿主 PATH', () => {
+  const h = harness();
+  h.ps.start();
+  assert.strictEqual(h.factoryCalls[0].opts.env.PATH, process.env.PATH);
+});
+
+// ---- 变异 4：先写屏幕再派发 data ----
+
+test('PTY 输出先写屏幕再派发 data 事件', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.order.length = 0;
+  h.emitData('x');
+  assert.deepStrictEqual(h.order, ['screen', 'event']);
+});
+
+// ---- 变异 5：无 alias 时 snapshot().alias 严格为 null ----
+
+test('session 无 alias 时 snapshot().alias 严格为 null', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  assert.strictEqual(h.ps.snapshot().alias, null);
+});
+
+// ---- 变异 6：普通字符不得触发 pc-input ----
+
+test('onPcKeys 普通字符不产生 pc-input、不改 lastInput', () => {
+  const h = harness();
+  h.ps.start(); h.ps._pollReady();
+  h.ps.onPcKeys('a');
+  assert.deepStrictEqual(h.written, ['a']);
+  assert.strictEqual(h.events.filter((e) => e.type === 'pc-input').length, 0);
+  assert.strictEqual(h.session.lastInput, null);
+  assert.strictEqual(h.ps.status, 'idle');
+});
+
+// ---- 变异 7：ready 必须先于排队的 turn-start ----
+
+test('就绪时先派发 ready 再写出排队 turn（turn-start 在后）', () => {
+  const h = harness();
+  h.ps.start();
+  h.ps.submitText('一', 'phone');
+  h.ps._pollReady();
+  const readyIdx = h.events.findIndex((e) => e.type === 'ready');
+  const turnIdx = h.events.findIndex((e) => e.type === 'turn-start');
+  assert.ok(readyIdx >= 0 && turnIdx >= 0);
+  assert.ok(readyIdx < turnIdx, `ready(${readyIdx}) 应在 turn-start(${turnIdx}) 之前`);
 });
