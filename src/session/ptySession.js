@@ -168,7 +168,6 @@ function createPtySession({
     if (disposed) return;
     disposed = true;
     status = 'closed';
-    session.status = 'closed';
     clearReadyTimer();
     queue.drain();
     if (pty) pty.kill();

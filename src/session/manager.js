@@ -419,7 +419,6 @@ function createManager({
     }
 
     record.status = 'starting';
-    record.error = null;
     record.pendingCard = null;
     record.lastActiveAt = new Date(now()).toISOString();
     store.save();

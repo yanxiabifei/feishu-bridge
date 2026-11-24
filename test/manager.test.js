@@ -71,7 +71,11 @@ function setup({
         };
       },
       releaseTurn() {},
-      kill() { ps.killed = true; },
+      kill() {
+        ps.killed = true;
+        // 模拟真实路径：kill 会同步派发 exit（真实实现不再改 session.status，由 manager 负责）
+        ps.emit({ type: 'exit', code: 0 });
+      },
       emit(e) { o.onEvent({ sessionId: o.session.id, ...e }); },
     };
     spawned.push(ps);
@@ -685,4 +689,16 @@ test('closeSession：notify 时群发「会话已结束」，autoDisband 打开�
 
   assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('会话已结束')));
   assert.ok(calls.some((c) => c[0] === 'disbandChat' && c[1] === 'oc_1'));
+});
+
+test('closeSession：主动关闭不会误报进程崩溃', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  await manager.closeSession(rec.id, { notify: true });
+  await manager._drain();
+
+  assert.strictEqual(spawned[0].killed, true);
+  assert.strictEqual(spawned[0].session.status, 'closed');
+  assert.strictEqual(manager._sessions.size, 0);
+  assert.ok(!calls.some((c) => c[0] === 'sendCard' && c[2].header.title.content.includes('进程异常退出')));
+  assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('会话已结束')));
 });
