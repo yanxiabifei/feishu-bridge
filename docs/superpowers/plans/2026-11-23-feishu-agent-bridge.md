@@ -8429,6 +8429,12 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 31. **其余实现期实测结论（任务 7/12/13）。** ①hook-stop 看门狗 `BUDGET_MS = 1500`（绝对兜底），llhttp 在请求行解析阶段对非法方法字符直接回 `400`，因此测试构造的畸形请求要用 `X` 而不是空格，才能命中应用层看门狗而非解析层。②屏幕就绪判定用的是底部 30 行「草稿窗口」+ `lastPromptIndex` 向右移动，往下滚动的长输出不会误判为「回到输入框」。③`WSClient` 的 `onError` 目前只进 SDK 自己的 logger，不路由到应用日志；长连接错误排障需看 `logs/` 之外的 stdout，属已知观测缺口。④富文本 `content_v2` 的 markdown 子集有限，`post` 里不要塞表格/嵌套列表，已按纯文本降级处理。
 
+32. **真实 transcript 里 user 条目绝大多数是 tool_result（任务 17）。** 每调用一次工具，Claude Code 就写一条 `{type:'user', message:{content:[{type:'tool_result'}]}}`，紧跟 assistant 的 tool_use。`summarizeToolUse` 倒扫时若「见 user 就停」，第一个非 assistant 条目几乎必然是 tool_result，摘要恒为空——质量审查实测本机 6 个真实 jsonl 全部返回空串。已改为：content 全为 `tool_result` 块的 user 条目 `continue`，字符串或含 text 块的 user 条目才是真实轮次边界。测试夹具必须用「assistant tool_use ↔ user tool_result 交替 + 真实用户提示」的真实形状，否则改回错误实现也测不出来。
+
+33. **处理中卡片的生命周期与竞态（任务 17）。** ①Stop 的所有提前返回路径（空白输入、无回复且未打断）必须终结 `pendingCard`，否则卡片永远停在「处理中」，下一轮 turn-start 还会把 `pendingCard` 覆盖成新卡，旧卡再无机会定稿。②慢 `createCardEntity` 与 Stop 竞态：Stop 先到会先发回复卡，随后「处理中」卡才发出且永不终结。用 `record.turnSeq` 轮次 token 解决：turn-start 与 Stop 各递增一次；`startProcessingCard` 在 create 返回后校验 token，失配直接不发；`pendingCard` 在 `sendCardEntity` **之前**登记（登记与发卡之间的 `await` 是唯一交错点）。③`updateCardEntity` 失败仍会留下旧卡（已知、不阻断），warn 日志已带 `cardId`/`chatId` 便于排障。
+
+34. **`_drain` 必须是「等到队列稳定」的循环（任务 17）。** 直接暴露 `pendingWork` 是调用瞬间的 promise 快照：在 enqueue 之前 await 会立刻 resolve，测试假绿。已改为 `do { prev = pendingWork; await prev; } while (prev !== pendingWork)`。
+
 ---
 
 ## 8. 计划完成状态
