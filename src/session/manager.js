@@ -186,7 +186,7 @@ function createManager({
       chatName: chatName || parsed.alias || path.basename(parsed.cwd),
       cwd: parsed.cwd,
       alias: parsed.alias,
-      agent,
+      agent: parsed.agent || agent,
     });
     store.upsert(record);
     try {
