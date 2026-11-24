@@ -534,7 +534,11 @@ function createManager({
         record.lastActiveAt = new Date(now()).toISOString();
       }
     }
-    store.save();
+    try {
+      store.save();
+    } catch (err) {
+      log.warn('停机落盘失败', { message: String((err && err.message) || err) });
+    }
   }
 
   // --resume 起不来（记录被删/版本不对）时的兜底：丢掉旧会话 ID，新开一个。
