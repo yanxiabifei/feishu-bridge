@@ -148,13 +148,13 @@ parseChatId(evt) -> string                                  // 群解散 / 机�
 trustKey(cwd) -> string
 ensureTrusted({ claudeJsonPath, cwd }) -> boolean       // true = 本次写入过
 writeHookFile({ hooksDir, sessionId, hookScript }) -> path
-buildLaunch({ session, config }) -> { file, args, cwd }  // agent=claude|codex
+buildLaunch({ session, config, hooksDir, hookScript, claudeJsonPath }) -> { file, args, cwd }
 
 // src/agent/tools.js
 summarizeToolUse(jsonlText) -> string   // 如 '🔧 改了 3 个文件 · Bash×2'，无工具调用返回 ''
 
 // src/session/ptySession.js
-createPtySession({ session, launch, ptyFactory, screenFactory, queueFactory, log, onEvent, now })
+createPtySession({ session, launch, ptyFactory, screenFactory, queueFactory, log, onEvent, now, queueLimit })
   -> { start(), pollReady(), submitText(text, origin, { force? } = {}), onPcKeys(data), resize(cols, rows),
        snapshot(), kill(), get status(), get lastInput(), get screen(), needsConfirm(), releaseTurn(), session }
 // snapshot() 返回可序列化的会话状态对象（IPC 用）；屏幕文本走 get screen().snapshot({ lines })
