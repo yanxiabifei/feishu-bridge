@@ -8,7 +8,8 @@ const { createLogger } = require('../src/log');
 const { loadConfig } = require('../src/config');
 const { createSecretStore } = require('../src/secrets');
 const { createStore } = require('../src/store');
-const { loadProjects } = require('../src/projects');
+const { loadProjects, renameAlias } = require('../src/projects');
+const { createControl } = require('../src/control');
 const { createApi } = require('../src/feishu/api');
 const { createFeishuWs } = require('../src/feishu/ws');
 const { parseMessage, parseCardAction, parseChatId } = require('../src/feishu/events');
@@ -34,6 +35,7 @@ async function createDaemon({ deps = {} } = {}) {
   const ipcFactory = deps.ipcFactory || startIpc;
   const wsFactory = deps.wsFactory || createFeishuWs;
   const managerFactory = deps.managerFactory || createManager;
+  const controlFactory = deps.controlFactory || createControl;
   const ptySessionFactory = deps.ptySessionFactory || createPtySession;
   const screenFactory = deps.screenFactory || createScreen;
   const queueFactory = deps.queueFactory || createQueue;
@@ -124,6 +126,16 @@ async function createDaemon({ deps = {} } = {}) {
     }),
   });
 
+  const control = controlFactory({
+    api,
+    listSessions: () => manager.list(),
+    closeSession: (id, opts) => manager.closeSession(id, opts),
+    getProjects: getProjectsFn,
+    renameAlias: (args) => renameAlias({ file: pathsApi.PROJECTS, ...args }),
+    ownerOpenId: config.ownerOpenId,
+    log,
+  });
+
   const ws = wsFactory({
     appId: config.appId,
     appSecret,
@@ -136,6 +148,11 @@ async function createDaemon({ deps = {} } = {}) {
         if (m.unsupported) {
           api.sendText(m.chatId, `暂不支持 ${m.unsupported} 类型的消息，发文字、图片或文件吧。`)
             .catch((err) => log.warn('类型提示发送失败', { chatId: m.chatId, message: errText(err) }));
+          return;
+        }
+        if (m.chatType === 'p2p') {                            // 私聊 = 总控面板，绝不建会话
+          control.onMessage({ chatId: m.chatId, text: m.text, senderOpenId: m.openId })
+            .catch((err) => log.warn('总控面板处理失败', { chatId: m.chatId, message: errText(err) }));
           return;
         }
         manager.onPhoneMessage({ chatId: m.chatId, text: m.text, media: m.media, senderOpenId: m.openId })
@@ -153,9 +170,22 @@ async function createDaemon({ deps = {} } = {}) {
         manager.onBotRemoved({ chatId })
           .catch((err) => log.warn('移出处理失败', { chatId, message: errText(err) }));
       },
+      onBotAdded: (evt) => {
+        const chatId = parseChatId(evt);
+        const openId = (evt && evt.operator_id && evt.operator_id.open_id)
+          || (evt && evt.operator && evt.operator.open_id);
+        if (!chatId) return;
+        control.onBotAdded({ chatId, openId })
+          .catch((err) => log.warn('入群自我介绍失败', { chatId, message: errText(err) }));
+      },
       onCardAction: (evt) => {
         const a = parseCardAction(evt);
         if (!a) return;
+        if (a.action.act === 'alias-rename') {
+          control.onCardAction(a)
+            .catch((err) => log.warn('别名卡片处理失败', { chatId: a.chatId, message: errText(err) }));
+          return;
+        }
         manager.onCardAction(a)
           .catch((err) => log.warn('卡片动作处理失败', { chatId: a.chatId, message: errText(err) }));
       },
