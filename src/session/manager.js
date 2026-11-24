@@ -70,7 +70,10 @@ function createManager({
     const record = store.get(e.sessionId);
     if (!record) return;
     if (e.type === 'spawned') record.ptyPid = e.pid || null;
-    else if (e.type === 'ready') record.status = 'idle';
+    else if (e.type === 'ready') {
+      record.status = 'idle';
+      record.resuming = false;   // 起来了就说明 --resume 没失败，崩溃不再走降级重建
+    }
     else if (e.type === 'turn-start') record.status = 'running';
     else if (e.type === 'exit' && record.status !== 'closing') record.status = 'error';
     if (e.type === 'input' || e.type === 'pc-input') record.lastInput = e.input || null;
@@ -98,7 +101,10 @@ function createManager({
       const turn = record.turnSeq;
       enqueueWork(() => startProcessingCard(record, e, turn));
     }
-    if (e.type === 'exit' && record.status === 'error') enqueueWork(() => notifyCrash(record, e));
+    if (e.type === 'exit' && record.status === 'error') {
+      if (record.resuming) enqueueWork(() => retryWithoutResume(record));
+      else enqueueWork(() => notifyCrash(record, e));
+    }
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
     if (e.type === 'overflow') log.warn('队列已满', { sessionId: e.sessionId });
   }
@@ -421,12 +427,12 @@ function createManager({
     record.status = 'starting';
     record.pendingCard = null;
     record.lastActiveAt = new Date(now()).toISOString();
+    record.resuming = record.agent === 'claude' && Boolean(record.claudeSessionId);
     store.save();
     spawn(record);
     ipc?.broadcast({ type: 'session', session: record });
 
-    const resumed = record.agent === 'claude' && record.claudeSessionId;
-    await api.sendText(record.chatId, resumed ? '重新开起来了，接着上次的对话。' : '重新开起来了。');
+    await api.sendText(record.chatId, record.resuming ? '重新开起来了，接着上次的对话。' : '重新开起来了。');
     return true;
   }
 
@@ -453,6 +459,59 @@ function createManager({
       return;
     }
     log.warn('未知的卡片操作', { chatId, act });
+  }
+
+  // 启动时把 sessions.json 里的旧记录全部标成 interrupted，等用户发话再拉起来。
+  async function restoreAll() {
+    const records = store.all();
+    let restored = 0;
+    for (const record of records) {
+      if (record.status === 'closed') {
+        try {
+          store.remove(record.id);
+        } catch (err) {
+          log.warn('清理旧记录失败', { sessionId: record.id, message: String((err && err.message) || err) });
+        }
+        continue;
+      }
+      record.status = 'interrupted';
+      record.ptyPid = null;
+      restored += 1;
+      try {
+        await api.sendText(record.chatId, '电脑重启了，回一条消息我就接上。');
+      } catch (err) {
+        log.warn('重启提示发送失败', { chatId: record.chatId, message: String((err && err.message) || err) });
+      }
+    }
+    try {
+      store.save();
+    } catch (err) {
+      log.warn('重启状态落盘失败', { message: String((err && err.message) || err) });
+    }
+    return restored;
+  }
+
+  // --resume 起不来（记录被删/版本不对）时的兜底：丢掉旧会话 ID，新开一个。
+  async function retryWithoutResume(record) {
+    // 排队期间会话可能已被解散/移除，记录不在了就别再拉起新 PTY
+    if (store.get(record.id) !== record) return;
+    record.resuming = false;
+    record.claudeSessionId = null;
+    record.transcriptPath = null;
+    record.status = 'starting';
+    try {
+      store.save();
+    } catch (err) {
+      log.warn('重建状态落盘失败', { sessionId: record.id, message: String((err && err.message) || err) });
+    }
+    // 先拉起新 PTY 再发提示：await 期间若用户发消息，必须写进新 PTY 而不是已退出的旧 PTY
+    spawn(record);
+    ipc?.broadcast({ type: 'session', session: record });
+    try {
+      await api.sendText(record.chatId, '上次的对话记录不在了，改用新会话重建。');
+    } catch (err) {
+      log.warn('重建提示发送失败', { chatId: record.chatId, message: String((err && err.message) || err) });
+    }
   }
 
   // 由 daemon 每 30s 调一次（任务 21 装配时起定时器）：兜住丢失的解散事件。
@@ -506,20 +565,22 @@ function createManager({
       return;
     }
 
-    const ps = sessions.get(record.id);
+    let ps = sessions.get(record.id);
     let payload = String(text == null ? '' : text).trim();
 
-    if (payload === '重来' && (!ps || record.status === 'error')) {
+    if (payload === '重来' && (!ps || ['error', 'closed', 'interrupted'].includes(record.status))) {
       await revive(record);
       return;
     }
 
+    // 重启后内存里的 PTY 已经没了，interrupted 必须先于「已停」守卫处理
+    if (record.status === 'interrupted' && !ps) {
+      const ok = await revive(record);
+      if (!ok) return;
+      ps = sessions.get(record.id);
+    }
     if (!ps || ['error', 'closed', 'closing'].includes(record.status)) {
       await api.sendText(chatId, '这个会话已经停了，回复「重来」重新开一轮。');
-      return;
-    }
-    if (record.status === 'interrupted') {
-      await api.sendText(chatId, '电脑重启过，这个会话还没接上。再发一次，我就用 --resume 接着干。');
       return;
     }
 
@@ -560,6 +621,7 @@ function createManager({
     onCardAction,
     tick,
     revive,
+    restoreAll,
     _drain: drainWork,
     _sessions: sessions,
   };
