@@ -6,6 +6,7 @@
   "main": "bin/daemon.js",
   "scripts": {
     "start": "node bin/daemon.js",
+    "setup": "node bin/setup.js",
     "test": "node --test"
   },
   "dependencies": {
