@@ -156,6 +156,15 @@ function createPtySession({
     }
   }
 
+  // 窗口改尺寸：屏幕缓冲和 ConPTY 都要跟着变，否则换行位置会错。
+  function resize(cols, rows) {
+    const c = Math.floor(Number(cols));
+    const r = Math.floor(Number(rows));
+    if (!(c > 0 && r > 0)) return;
+    if (screen && typeof screen.resize === 'function') screen.resize(c, r);
+    if (pty && typeof pty.resize === 'function') pty.resize(c, r);
+  }
+
   function releaseTurn() {
     settlePolls = 0;
     if (disposed || status === 'closed' || status !== 'running') return;
@@ -176,7 +185,7 @@ function createPtySession({
   }
 
   return {
-    session, start, submitText, onPcKeys, releaseTurn, kill, pollReady,
+    session, start, submitText, onPcKeys, resize, releaseTurn, kill, pollReady,
     _pollReady: pollReady, _queue: queue,
     needsConfirm() { return status === 'idle' && !screen.inInputBox(); },
     snapshot() {

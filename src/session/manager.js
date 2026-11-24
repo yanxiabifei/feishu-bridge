@@ -36,6 +36,7 @@ function createManager({
   mediaRoot = paths.MEDIA,
 }) {
   const sessions = new Map();
+  let shuttingDown = false;
   const forcePending = new Map();   // chatId -> { text }：被护栏拦下、等「仍然发送」的那句
   const TOOL_SUMMARY_MAX_BYTES = 20 * 1024 * 1024;
   let pendingWork = Promise.resolve();
@@ -76,7 +77,7 @@ function createManager({
     }
     else if (e.type === 'turn-start') record.status = 'running';
     else if (e.type === 'turn-end' && record.status === 'running') record.status = 'idle';
-    else if (e.type === 'exit' && record.status !== 'closing') record.status = 'error';
+    else if (e.type === 'exit' && record.status !== 'closing' && !shuttingDown) record.status = 'error';
     if (e.type === 'input' || e.type === 'pc-input') record.lastInput = e.input || null;
 
     if (e.type === 'data') {
@@ -102,7 +103,7 @@ function createManager({
       const turn = record.turnSeq;
       enqueueWork(() => startProcessingCard(record, e, turn));
     }
-    if (e.type === 'exit' && record.status === 'error') {
+    if (e.type === 'exit' && record.status === 'error' && !shuttingDown) {
       if (record.resuming) enqueueWork(() => retryWithoutResume(record));
       else enqueueWork(() => notifyCrash(record, e));
     }
@@ -537,6 +538,55 @@ function createManager({
     return restored;
   }
 
+  function onPcKeys({ sessionId, data }) {
+    const ps = sessions.get(sessionId);
+    if (!ps || typeof data !== 'string' || data === '') return;
+    ps.onPcKeys(data);
+  }
+
+  function onPcResize({ sessionId, cols, rows }) {
+    const ps = sessions.get(sessionId);
+    if (!ps || typeof ps.resize !== 'function') return;
+    const c = Math.floor(Number(cols));
+    const r = Math.floor(Number(rows));
+    if (!(c > 0 && r > 0)) return;
+    ps.resize(c, r);
+  }
+
+  // 窗口连上来时的会话清单：以持久化记录为准，活会话叠加内存里的 pending/lastInput。
+  function list() {
+    return store.all().map((record) => {
+      const ps = sessions.get(record.id);
+      const snap = ps && typeof ps.snapshot === 'function' ? ps.snapshot() : {};
+      return { ...record, ...snap, status: record.status };
+    });
+  }
+
+  // 电脑正常退出：只杀进程、标记 interrupted，记录留着给下次启动 restoreAll() 接上。
+  async function shutdown() {
+    shuttingDown = true;
+    for (const id of [...sessions.keys()]) {
+      const ps = sessions.get(id);
+      const record = store.get(id);
+      sessions.delete(id);
+      try {
+        ps.kill();
+      } catch (err) {
+        log.warn('结束 PTY 失败', { sessionId: id, message: String((err && err.message) || err) });
+      }
+      if (record) {
+        record.status = 'interrupted';
+        record.ptyPid = null;
+        record.lastActiveAt = new Date(now()).toISOString();
+      }
+    }
+    try {
+      store.save();
+    } catch (err) {
+      log.warn('停机落盘失败', { message: String((err && err.message) || err) });
+    }
+  }
+
   // --resume 起不来（记录被删/版本不对）时的兜底：丢掉旧会话 ID，新开一个。
   async function retryWithoutResume(record) {
     // 排队期间会话可能已被解散/移除，记录不在了就别再拉起新 PTY
@@ -668,6 +718,10 @@ function createManager({
     tick,
     revive,
     restoreAll,
+    onPcKeys,
+    onPcResize,
+    list,
+    shutdown,
     _drain: drainWork,
     _sessions: sessions,
   };

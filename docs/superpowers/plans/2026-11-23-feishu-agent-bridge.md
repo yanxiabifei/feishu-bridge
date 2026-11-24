@@ -180,7 +180,7 @@ createManager({ config, api, store, log, createPtySession, ipc?, now?, rand?, fs
   restoreAll() -> Promise<void>,
   shutdown() -> Promise<void>,                                  // 电脑退出：杀 PTY、标记 interrupted、不发通知不解散群
   tick() -> Promise<void>,                                      // 30 秒巡检由 bin/daemon.js 调用
-  list() -> Array<record>                                       // IPC {type:'list'} 的应答；活会话给快照
+  list() -> Array<record>                                       // IPC {type:'list'} 的应答：记录为准，活会话叠加快照
 }
 // createPtySession 是装配阶段绑定好的工厂，manager 只传 { session, onEvent, queueLimit, now }
 // PTY 退出由 ptySession 自己 emit 'exit'，manager 在 onEvent 里统一处理（不设 onPtyExit 入口）

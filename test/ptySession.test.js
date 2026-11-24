@@ -6,6 +6,8 @@ const { createQueue } = require('../src/session/queue');
 function harness(overrides = {}) {
   const written = [];
   const events = [];
+  const resized = [];
+  const screenResized = [];
   const order = [];
   const launchCalls = [];
   const factoryCalls = [];
@@ -19,6 +21,7 @@ function harness(overrides = {}) {
     onData(fn) { dataHandler = fn; },
     onExit(fn) { exitHandler = fn; },
     write(s) { written.push(s); },
+    resize(c, r) { resized.push([c, r]); },
     kill() { exitHandler({ exitCode: 0 }); },
   };
 
@@ -29,7 +32,7 @@ function harness(overrides = {}) {
     inputLine: () => overrides.inputLine || '输入中的话',
     inInputBox: () => inBox,
     bracketedPaste: (t) => `\x1b[200~${t}\x1b[201~`,
-    resize() {},
+    resize(c, r) { screenResized.push([c, r]); },
     dispose() {},
   };
   let lastScreen = '';
@@ -57,7 +60,7 @@ function harness(overrides = {}) {
   });
 
   return {
-    ps, written, events, order, session, launchCalls, factoryCalls,
+    ps, written, events, resized, screenResized, order, session, launchCalls, factoryCalls,
     screenText() { return lastScreen; },
     setReady(v) { ready = v; },
     setInBox(v) { inBox = v; },
@@ -658,4 +661,14 @@ test('codex 回到 idle 后继续轮询不会重复派发 turn-end（running 守
   h.setNow(9000);
   for (let i = 0; i < 5; i += 1) h.ps._pollReady();
   assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
+});
+
+test('resize：合法尺寸转发给屏幕与 PTY，非法尺寸忽略', () => {
+  const h = harness();
+  h.ps.start();
+  h.ps.resize(100, 30);
+  h.ps.resize(0, 30);
+  h.ps.resize(100, -1);
+  assert.deepStrictEqual(h.resized, [[100, 30]]);
+  assert.deepStrictEqual(h.screenResized, [[100, 30]]);
 });

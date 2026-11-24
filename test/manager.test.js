@@ -18,6 +18,16 @@ function fakeStore() {
   return store;
 }
 
+function fakeLog() {
+  const warns = [];
+  return {
+    warns,
+    info() {},
+    warn(message, meta) { warns.push([message, meta]); },
+    error() {},
+  };
+}
+
 function fakeApi(overrides = {}) {
   const calls = [];
   const api = {
@@ -36,7 +46,7 @@ function fakeApi(overrides = {}) {
 }
 
 function setup({
-  apiOverrides, fsApi, getProjects, now, projects, spawnThrows = false, ipc: ipcArg = null, configOverrides,
+  apiOverrides, fsApi, getProjects, now, projects, spawnThrows = false, ipc: ipcArg = null, configOverrides, log: logArg = null,
 } = {}) {
   const store = fakeStore();
   const { api, calls } = fakeApi(apiOverrides);
@@ -60,8 +70,10 @@ function setup({
         ps.submitted.push(item);
         return ps.pushResult || 'queued';
       },
-      onPcKeys() {},
+      onPcKeys(data) { (ps.keys || (ps.keys = [])).push(data); },
+      resize(cols, rows) { (ps.resized || (ps.resized = [])).push([cols, rows]); },
       needsConfirm() { return ps.confirm; },
+      snapshot() { return { id: o.session.id, chatId: o.session.chatId, agent: o.session.agent, cwd: o.session.cwd }; },
       get screen() {
         return {
           snapshot(opts) {
@@ -81,6 +93,7 @@ function setup({
     spawned.push(ps);
     return ps;
   };
+  const log = logArg || { info() {}, warn() {}, error() {} };
   const manager = createManager({
     config: {
       defaultCwd: 'D:/w',
@@ -91,7 +104,7 @@ function setup({
     },
     api,
     store,
-    log: { info() {}, warn() {}, error() {} },
+    log,
     createPtySession,
     ipc,
     mediaRoot: 'D:/media',
@@ -101,7 +114,7 @@ function setup({
     getProjects: getProjects || (() => ({ ...(projects || { aliases: { 卡牌: 'D:/card' }, default: 'D:/w' }) })),
   });
   return {
-    manager, store, calls, spawned, broadcasts,
+    manager, store, calls, spawned, broadcasts, log,
   };
 }
 
@@ -911,4 +924,81 @@ test('codex turn-end：取画面抛错时不推卡也不抛', async () => {
   await assert.doesNotReject(h.manager._drain());
 
   assert.strictEqual(h.calls.slice(before).filter((c) => c[0] === 'sendCard').length, 0);
+});
+
+test('onPcKeys：转发电脑按键，忽略空数据与未知会话', async () => {
+  const { manager, spawned } = await started();
+  const id = spawned[0].session.id;
+  manager.onPcKeys({ sessionId: id, data: 'a' });
+  manager.onPcKeys({ sessionId: id, data: '' });
+  manager.onPcKeys({ sessionId: id });
+  manager.onPcKeys({ sessionId: 'nope', data: 'b' });
+  assert.deepStrictEqual(spawned[0].keys, ['a']);
+});
+
+test('onPcResize：转发合法尺寸，忽略非法尺寸与未知会话', async () => {
+  const { manager, spawned } = await started();
+  const id = spawned[0].session.id;
+  manager.onPcResize({ sessionId: id, cols: 120, rows: 40 });
+  manager.onPcResize({ sessionId: id, cols: 0, rows: 40 });
+  manager.onPcResize({ sessionId: 'nope', cols: 10, rows: 10 });
+  assert.deepStrictEqual(spawned[0].resized, [[120, 40]]);
+});
+
+test('list：活会话叠加快照，退出后状态为 error', async () => {
+  const { manager, spawned, rec } = await started();
+  const live = manager.list().find((s) => s.id === rec.id);
+  assert.strictEqual(live.status, 'idle');
+  assert.strictEqual(live.cwd, 'D:/card');
+
+  spawned[0].emit({ type: 'exit', code: 1 });
+  await manager._drain();
+  const dead = manager.list().find((s) => s.id === rec.id);
+  assert.strictEqual(dead.status, 'error');
+});
+
+test('shutdown：杀 PTY、标记 interrupted、不解散群也不推崩溃卡', async () => {
+  const broadcasts = [];
+  // 按广播时刻快照会话：record 是活对象，shutdown 随后会把 status 改成 interrupted，
+  // 直接存引用会掩盖「关机瞬间短暂 error」的现场。
+  const ipc = {
+    broadcast: (msg) => broadcasts.push(
+      msg && msg.type === 'session' ? { type: msg.type, session: { ...msg.session } } : msg,
+    ),
+  };
+  const { manager, calls, store, spawned, rec } = await started({ ipc });
+  calls.length = 0;   // 清掉建会话时的「已开工」卡，只看停机阶段发出的调用
+  spawned[0].kill = () => {
+    spawned[0].killed = true;
+    spawned[0].emit({ type: 'exit', code: 1 });
+  };
+  await manager.shutdown();
+  await manager._drain();
+
+  assert.strictEqual(spawned[0].killed, true);
+  assert.strictEqual(store.get(rec.id).status, 'interrupted');
+  assert.strictEqual(store.get(rec.id).ptyPid, null);
+  assert.ok(!calls.some((c) => c[0] === 'disbandChat'));
+  assert.ok(!calls.some((c) => c[0] === 'sendCard'));
+  assert.ok(
+    !broadcasts.some((m) => m.type === 'session' && m.session.status === 'error'),
+    '关机瞬间不应向窗口/手机广播 error 状态',
+  );
+});
+
+test('shutdown：落盘失败不击穿，会话仍标 interrupted 并有 warn', async () => {
+  const log = fakeLog();
+  const { manager, store, spawned, rec } = await started({ log });
+  spawned[0].kill = () => {
+    spawned[0].killed = true;
+    spawned[0].emit({ type: 'exit', code: 1 });
+  };
+  store.save = () => { throw new Error('磁盘满了'); };
+
+  await assert.doesNotReject(() => manager.shutdown());
+
+  assert.strictEqual(spawned[0].killed, true);
+  assert.strictEqual(store.get(rec.id).status, 'interrupted');
+  assert.strictEqual(manager._sessions.size, 0);
+  assert.ok(log.warns.some(([msg]) => msg === '停机落盘失败'));
 });
