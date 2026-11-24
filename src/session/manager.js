@@ -32,8 +32,10 @@ function createManager({
   rand = () => Math.random(),
   fsApi = fs,
   getProjects = null,
+  mediaRoot = paths.MEDIA,
 }) {
   const sessions = new Map();
+  const forcePending = new Map();   // chatId -> { text }：被护栏拦下、等「仍然发送」的那句
   const loadProjectsFn = getProjects
     || (() => loadProjects({ file: paths.PROJECTS, defaultCwd: config.defaultCwd }));
 
@@ -202,9 +204,84 @@ function createManager({
     return record;
   }
 
+  // 文件名只留安全字符，截断到 120 字符以内（Windows 路径上限）
+  function safeName(name) {
+    const base = String(name || 'file').replace(/[\\/:*?"<>|]/g, '_').trim();
+    return base.slice(-120) || 'file';
+  }
+
+  async function attachMedia(chatId, text, media) {
+    try {
+      const buf = await api.downloadResource(media.messageId, media.fileKey, media.type);
+      const dir = path.join(mediaRoot, chatId);
+      fsApi.mkdirSync(dir, { recursive: true });
+      const abs = path.join(dir, safeName(media.fileName));
+      fsApi.writeFileSync(abs, buf);
+      return text ? `${text}\n\n[附件] ${abs}` : `[附件] ${abs}`;
+    } catch (err) {
+      log.warn('附件下载失败', { chatId, message: String((err && err.message) || err) });
+      await api.sendText(chatId, '附件下载失败了，把内容直接打出来吧。');
+      return text;
+    }
+  }
+
+  async function onPhoneMessage({
+    chatId, text, media = null, senderOpenId = null,
+  }) {
+    if (config.ownerOpenId && senderOpenId && senderOpenId !== config.ownerOpenId) {
+      log.warn('忽略非主人的消息', { chatId });
+      return;
+    }
+
+    const record = store.getByChat(chatId);
+    if (!record) {
+      // 没登记过的群：首句即建会话指令（ws 层只把 @机器人 的消息转发到这里）
+      await createFromPhone({ chatId, chatName: null, text, agent: config.defaultAgent || 'claude' });
+      return;
+    }
+
+    const ps = sessions.get(record.id);
+    if (!ps || ['error', 'closed', 'closing'].includes(record.status)) {
+      await api.sendText(chatId, '这个会话已经停了，回复「重来」重新开一轮。');
+      return;
+    }
+    if (record.status === 'interrupted') {
+      await api.sendText(chatId, '电脑重启过，这个会话还没接上。再发一次，我就用 --resume 接着干。');
+      return;
+    }
+
+    let payload = String(text == null ? '' : text).trim();
+
+    const pending = forcePending.get(chatId);
+    if (pending && payload === '仍然发送') {
+      forcePending.delete(chatId);
+      ps.submitText(pending.text, 'phone', { force: true });
+      return;
+    }
+    forcePending.delete(chatId);
+
+    if (media) payload = await attachMedia(chatId, payload, media);
+    if (!payload) return;
+
+    if (ps.needsConfirm()) {
+      forcePending.set(chatId, { text: payload });
+      await api.sendCard(chatId, cards.screenCard({
+        text: ps.screen.snapshot({ lines: 40 }),
+        reason: 'not-ready',
+      }));
+      return;
+    }
+
+    const result = ps.submitText(payload, 'phone');
+    if (result === 'full') {
+      await api.sendText(chatId, `积压了 ${config.queueLimit} 条还没处理完，稍后再发。`);
+    }
+  }
+
   return {
     createFromPhone,
     createFromPc,
+    onPhoneMessage,
     _sessions: sessions,
   };
 }

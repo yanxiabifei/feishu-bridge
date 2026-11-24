@@ -249,3 +249,109 @@ test('createFromPc：spawn 抛错 → 回滚记录、解散空群并抛错', asy
   assert.strictEqual(manager._sessions.size, 0);
   assert.ok(calls.some((c) => c[0] === 'disbandChat' && c[1] === 'oc_new'));
 });
+
+test('onPhoneMessage：未登记的群把首句当作建会话指令', async () => {
+  const { manager, store, spawned } = setup();
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '卡牌 加个技能', senderOpenId: 'ou_me' });
+  assert.strictEqual(store.all().length, 1);
+  assert.strictEqual(store.getByChat('oc_1').cwd, 'D:/card');
+  assert.deepStrictEqual(spawned[0].submitted, [{ text: '加个技能', origin: 'phone' }]);
+});
+
+test('onPhoneMessage：登记过的群直接进队列（去掉首尾空白）', async () => {
+  const { manager, spawned } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '  跑一下测试  ', senderOpenId: 'ou_me' });
+  assert.deepStrictEqual(spawned[0].submitted.at(-1), { text: '跑一下测试', origin: 'phone' });
+});
+
+test('onPhoneMessage：非主人的消息一律忽略', async () => {
+  const { manager, spawned, calls } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: 'rm -rf', senderOpenId: 'ou_other' });
+  assert.strictEqual(spawned[0].submitted.length, 0);
+  assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, 1); // 只有「已开工」
+});
+
+test('onPhoneMessage：队列满时提示积压', async () => {
+  const { manager, spawned, calls } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  spawned[0].pushResult = 'full';
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '再来一条', senderOpenId: 'ou_me' });
+  assert.ok(calls.some((c) => c[0] === 'sendText' && /积压/.test(c[2])));
+});
+
+test('onPhoneMessage：不在输入框 → 回画面卡片，不写入', async () => {
+  const { manager, spawned, calls } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  spawned[0].confirm = true;
+  spawned[0].screenText = '❯ 1. Yes';
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+  assert.strictEqual(spawned[0].submitted.length, 0);
+  const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  assert.strictEqual(card.header.title.content, '🖥 当前画面');
+  assert.ok(JSON.stringify(card).includes('❯ 1. Yes'));
+});
+
+test('onPhoneMessage：回「仍然发送」强行写入上一条', async () => {
+  const { manager, spawned } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  spawned[0].confirm = true;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
+  assert.deepStrictEqual(spawned[0].submitted, [{ text: '继续', origin: 'phone', force: true }]);
+});
+
+test('onPhoneMessage：媒体先落盘，再把绝对路径发给会话', async () => {
+  const writes = [];
+  const { manager, spawned } = setup({
+    apiOverrides: { downloadResource: async () => Buffer.from('img') },
+    fsApi: {
+      existsSync: () => true,
+      mkdirSync() {},
+      writeFileSync: (p, b) => writes.push([p, b.toString()]),
+    },
+  });
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  await manager.onPhoneMessage({
+    chatId: 'oc_1',
+    text: '照这个改',
+    senderOpenId: 'ou_me',
+    media: { messageId: 'om_1', fileKey: 'fk_1', fileName: '截图.png', type: 'image' },
+  });
+  assert.deepStrictEqual(writes.map((w) => w[1]), ['img']);
+  assert.ok(writes[0][0].endsWith('截图.png'));
+  const sent = spawned[0].submitted.at(-1).text;
+  assert.ok(sent.includes('照这个改'));
+  assert.ok(sent.includes('截图.png'));
+});
+
+test('onPhoneMessage：会话已停 → 提示「重来」，不写入', async () => {
+  const { manager, spawned, calls } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  spawned[0].emit({ type: 'exit', code: 1 });
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '还在吗', senderOpenId: 'ou_me' });
+  assert.strictEqual(spawned[0].submitted.length, 0);
+  assert.ok(calls.some((c) => c[0] === 'sendText' && /重来/.test(c[2])));
+});
+
+test('onPhoneMessage：普通消息会清掉待确认的旧文本，「仍然发送」不会复活它', async () => {
+  const { manager, spawned } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+
+  // 先被护栏拦下，暂存「继续」
+  spawned[0].confirm = true;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+  assert.strictEqual(spawned[0].submitted.length, 0);
+
+  // 护栏解除后发一条普通消息：应正常入队，并清掉暂存
+  spawned[0].confirm = false;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '先做别的', senderOpenId: 'ou_me' });
+
+  // 再发「仍然发送」：此时没有待确认文本，不能被当成强写指令把「继续」塞进去
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
+
+  const texts = spawned[0].submitted.map((s) => s.text);
+  assert.deepStrictEqual(texts, ['先做别的', '仍然发送']);
+  assert.ok(!spawned[0].submitted.some((s) => s.force === true));
+});
