@@ -36,17 +36,18 @@ function fakeApi(overrides = {}) {
 }
 
 function setup({
-  apiOverrides, fsApi, getProjects, now, projects, spawnThrows = false,
+  apiOverrides, fsApi, getProjects, now, projects, spawnThrows = false, ipc: ipcArg = null, configOverrides,
 } = {}) {
   const store = fakeStore();
   const { api, calls } = fakeApi(apiOverrides);
   const broadcasts = [];
-  const ipc = { broadcast: (msg) => broadcasts.push(msg) };
+  const ipc = ipcArg || { broadcast: (msg) => broadcasts.push(msg) };
   const spawned = [];
   const createPtySession = (o) => {
     const ps = {
       session: o.session,
       started: false,
+      killed: false,
       submitted: [],
       confirm: false,
       start() {
@@ -70,7 +71,11 @@ function setup({
         };
       },
       releaseTurn() {},
-      kill() {},
+      kill() {
+        ps.killed = true;
+        // 模拟真实路径：kill 会同步派发 exit（真实实现不再改 session.status，由 manager 负责）
+        ps.emit({ type: 'exit', code: 0 });
+      },
       emit(e) { o.onEvent({ sessionId: o.session.id, ...e }); },
     };
     spawned.push(ps);
@@ -82,6 +87,7 @@ function setup({
       ownerOpenId: 'ou_me',
       queueLimit: 20,
       autoDisband: false,
+      ...configOverrides,
     },
     api,
     store,
@@ -586,4 +592,113 @@ test('enqueueWork：建卡失败后队列仍能继续处理下一次 turn-start'
 
   assert.strictEqual(createCalls, 2);
   assert.ok(!rec.pendingCard);
+});
+
+test('onDisbanded：杀 PTY、移除记录、窗口收到 closed', async () => {
+  const broadcasts = [];
+  const { manager, store, spawned, rec } = await started({ ipc: { broadcast: (m) => broadcasts.push(m) } });
+  await manager.onDisbanded({ chatId: 'oc_1' });
+
+  assert.strictEqual(spawned[0].killed, true);
+  assert.strictEqual(store.get(rec.id), null);
+  assert.ok(broadcasts.some((m) => m.type === 'session' && m.session.status === 'closed'));
+});
+
+test('onDisbanded：没登记的群静默返回', async () => {
+  const { manager, spawned } = setup();
+  await manager.onDisbanded({ chatId: 'oc_none' });
+  assert.strictEqual(spawned.length, 0);
+});
+
+test('onBotRemoved：等同解散', async () => {
+  const { manager, store, spawned, rec } = await started();
+  await manager.onBotRemoved({ chatId: 'oc_1' });
+  assert.strictEqual(spawned[0].killed, true);
+  assert.strictEqual(store.get(rec.id), null);
+});
+
+test('PTY 崩溃：状态转 error，群里收到异常卡片', async () => {
+  const { manager, calls, store, spawned, rec } = await started();
+  spawned[0].emit({ type: 'exit', code: 1 });
+  await manager._drain();
+
+  assert.strictEqual(store.get(rec.id).status, 'error');
+  const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  assert.ok(card.header.title.content.includes('异常退出'));
+  assert.ok(JSON.stringify(card).includes('code 1'));
+  assert.ok(JSON.stringify(card).includes('重来'));
+});
+
+test('回「重来」：目录还在就重新拉起 PTY', async () => {
+  const { manager, store, spawned, rec } = await started();
+  spawned[0].emit({ type: 'exit', code: 2 });
+  await manager._drain();
+  assert.strictEqual(store.get(rec.id).status, 'error');
+
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
+
+  assert.strictEqual(spawned.length, 2);
+  assert.strictEqual(spawned[1].started, true);
+  assert.strictEqual(store.get(rec.id).status, 'starting');
+});
+
+test('回「重来」：原目录不在了就报错，不再拉起', async () => {
+  let gone = false;
+  const { manager, calls, spawned } = await started({
+    fsApi: { existsSync: () => !gone, mkdirSync() {} },
+  });
+  spawned[0].emit({ type: 'exit', code: 2 });
+  await manager._drain();
+  gone = true;
+
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
+
+  assert.strictEqual(spawned.length, 1);
+  const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  assert.ok(card.header.title.content.includes('目录'));
+});
+
+test('tick：群已不存在 → 关闭会话；群还在 → 不动', async () => {
+  let existing = true;
+  const { manager, store, spawned, rec } = await started({
+    apiOverrides: { getChat: async () => (existing ? { chat_id: 'oc_1' } : null) },
+  });
+
+  await manager.tick();
+  assert.strictEqual(spawned[0].killed, false);
+
+  existing = false;
+  await manager.tick();
+  assert.strictEqual(spawned[0].killed, true);
+  assert.strictEqual(store.get(rec.id), null);
+});
+
+test('onCardAction：force-send 按钮等同「仍然发送」', async () => {
+  const { manager, spawned } = await started();
+  spawned[0].confirm = true;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  await manager.onCardAction({ chatId: 'oc_1', openId: 'ou_me', action: { act: 'force-send' } });
+
+  assert.deepStrictEqual(spawned[0].submitted.at(-1), { text: '继续', origin: 'phone', force: true });
+});
+
+test('closeSession：notify 时群发「会话已结束」，autoDisband 打开则解散群', async () => {
+  const { manager, calls, rec } = await started({ configOverrides: { autoDisband: true } });
+  await manager.closeSession(rec.id, { reason: 'window', notify: true });
+
+  assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('会话已结束')));
+  assert.ok(calls.some((c) => c[0] === 'disbandChat' && c[1] === 'oc_1'));
+});
+
+test('closeSession：主动关闭不会误报进程崩溃', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  await manager.closeSession(rec.id, { notify: true });
+  await manager._drain();
+
+  assert.strictEqual(spawned[0].killed, true);
+  assert.strictEqual(spawned[0].session.status, 'closed');
+  assert.strictEqual(manager._sessions.size, 0);
+  assert.ok(!calls.some((c) => c[0] === 'sendCard' && c[2].header.title.content.includes('进程异常退出')));
+  assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('会话已结束')));
 });
