@@ -4,16 +4,18 @@ const { createManager } = require('../src/session/manager');
 
 function fakeStore() {
   const map = new Map();
-  return {
+  const store = {
     map,
+    saveCalls: 0,
     load() {},
     all: () => [...map.values()],
     get: (id) => map.get(id) || null,
     getByChat: (chatId) => [...map.values()].find((s) => s.chatId === chatId) || null,
     upsert(s) { map.set(s.id, s); },
     remove(id) { map.delete(id); },
-    save() {},
+    save() { store.saveCalls += 1; },
   };
+  return store;
 }
 
 function fakeApi(overrides = {}) {
@@ -34,10 +36,12 @@ function fakeApi(overrides = {}) {
 }
 
 function setup({
-  apiOverrides, fsApi, getProjects, now, projects,
+  apiOverrides, fsApi, getProjects, now, projects, spawnThrows = false,
 } = {}) {
   const store = fakeStore();
   const { api, calls } = fakeApi(apiOverrides);
+  const broadcasts = [];
+  const ipc = { broadcast: (msg) => broadcasts.push(msg) };
   const spawned = [];
   const createPtySession = (o) => {
     const ps = {
@@ -45,7 +49,10 @@ function setup({
       started: false,
       submitted: [],
       confirm: false,
-      start() { ps.started = true; },
+      start() {
+        if (spawnThrows) throw new Error('pty 启动失败');
+        ps.started = true;
+      },
       submitText(text, origin, opts) {
         const item = { text, origin };
         if (opts && opts.force) item.force = true;
@@ -73,13 +80,16 @@ function setup({
     store,
     log: { info() {}, warn() {}, error() {} },
     createPtySession,
+    ipc,
     mediaRoot: 'D:/media',
     now: now || (() => new Date(2026, 10, 23, 21, 40).getTime()),
     rand: () => 0,
     fsApi: fsApi || { existsSync: () => true, mkdirSync() {} },
     getProjects: getProjects || (() => ({ ...(projects || { aliases: { 卡牌: 'D:/card' }, default: 'D:/w' }) })),
   });
-  return { manager, store, calls, spawned };
+  return {
+    manager, store, calls, spawned, broadcasts,
+  };
 }
 
 test('createFromPhone：别名命中 → 建记录、起 PTY、提交首条、回已开工卡片', async () => {
@@ -158,10 +168,84 @@ test('createFromPc：目录不存在时抛错', async () => {
 test('PTY 事件：spawned 记 pid、ready 转 idle 并落盘', async () => {
   const { manager, store, spawned } = setup();
   const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 一' });
+  const before = store.saveCalls;
   spawned[0].emit({ type: 'spawned', pid: 4321 });
   spawned[0].emit({ type: 'ready' });
   spawned[0].emit({ type: 'input', input: { seq: 1, origin: 'phone', text: '一', at: 1 } });
   assert.strictEqual(store.get(rec.id).ptyPid, 4321);
   assert.strictEqual(store.get(rec.id).status, 'idle');
   assert.strictEqual(store.get(rec.id).lastInput.origin, 'phone');
+  assert.strictEqual(store.saveCalls, before + 3);
+});
+
+test('onEvent：data 只广播不落盘', async () => {
+  const { manager, store, spawned, broadcasts } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 一' });
+  const before = store.saveCalls;
+  spawned[0].emit({ type: 'data', data: 'x' });
+  assert.deepStrictEqual(broadcasts[broadcasts.length - 1], {
+    type: 'data',
+    sessionId: spawned[0].session.id,
+    data: 'x',
+  });
+  assert.strictEqual(store.saveCalls, before);
+});
+
+test('onEvent：落盘异常不击穿 emit，仍广播', async () => {
+  const { manager, store, spawned, broadcasts } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 一' });
+  store.save = () => { throw new Error('磁盘满了'); };
+  assert.doesNotThrow(() => spawned[0].emit({ type: 'ready' }));
+  const last = broadcasts[broadcasts.length - 1];
+  assert.strictEqual(last.type, 'session');
+  assert.strictEqual(last.session.status, 'idle');
+});
+
+test('createFromPhone：别名指向目录不存在 → 回目录不存在红卡并含别名', async () => {
+  const { manager, store, calls } = setup({
+    getProjects: () => ({ aliases: { 卡牌: 'D:/gone' }, default: 'D:/w' }),
+    fsApi: { existsSync: (p) => p !== 'D:/gone', mkdirSync() {} },
+  });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 做点事' });
+  assert.strictEqual(rec, null);
+  assert.strictEqual(store.all().length, 0);
+  const cardCall = calls.find((c) => c[0] === 'sendCard');
+  assert.strictEqual(cardCall[2].header.title.content, '目录不存在');
+  assert.ok(JSON.stringify(cardCall[2]).includes('卡牌'));
+});
+
+test('createFromPhone：默认目录创建失败 → 回目录创建失败红卡，不建会话', async () => {
+  const { manager, store, calls } = setup({
+    getProjects: () => ({ aliases: {}, default: 'D:/w' }),
+    fsApi: { existsSync: () => false, mkdirSync() { throw new Error('EACCES'); } },
+  });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: 'x', text: '随便做点什么' });
+  assert.strictEqual(rec, null);
+  assert.strictEqual(store.all().length, 0);
+  const cardCall = calls.find((c) => c[0] === 'sendCard');
+  assert.strictEqual(cardCall[2].header.title.content, '目录创建失败');
+  assert.ok(JSON.stringify(cardCall[2]).includes('EACCES'));
+});
+
+test('createFromPhone：spawn 抛错 → 回滚 store 与 sessions，回启动失败红卡', async () => {
+  const { manager, store, calls } = setup({ spawnThrows: true });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 一' });
+  assert.strictEqual(rec, null);
+  assert.strictEqual(store.getByChat('oc_1'), null);
+  assert.strictEqual(store.all().length, 0);
+  assert.strictEqual(manager._sessions.size, 0);
+  const cardCall = calls.find((c) => c[0] === 'sendCard');
+  assert.strictEqual(cardCall[2].header.title.content, '启动失败');
+  assert.ok(JSON.stringify(cardCall[2]).includes('pty 启动失败'));
+});
+
+test('createFromPc：spawn 抛错 → 回滚记录、解散空群并抛错', async () => {
+  const { manager, store, calls } = setup({ spawnThrows: true });
+  await assert.rejects(
+    () => manager.createFromPc({ cwd: 'D:/card', alias: '卡牌' }),
+    /会话启动失败/,
+  );
+  assert.strictEqual(store.all().length, 0);
+  assert.strictEqual(manager._sessions.size, 0);
+  assert.ok(calls.some((c) => c[0] === 'disbandChat' && c[1] === 'oc_new'));
 });

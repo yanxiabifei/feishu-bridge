@@ -17,6 +17,10 @@ function stamp(ms) {
   return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
+function errMessage(err) {
+  return String((err && err.message) || err);
+}
+
 function createManager({
   config,
   api,
@@ -58,7 +62,12 @@ function createManager({
     }
     if (PERSIST_EVENTS.has(e.type)) {
       record.lastActiveAt = new Date(now()).toISOString();
-      store.save();
+      try {
+        store.save();
+      } catch (err) {
+        // 磁盘异常不能沿 PTY emit 链击穿，至少把状态广播出去
+        log.warn('落盘失败', { sessionId: e.sessionId, message: errMessage(err) });
+      }
       if (ipc && ipc.broadcast) ipc.broadcast({ type: 'session', session: record });
     }
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
@@ -125,7 +134,16 @@ function createManager({
         }));
         return null;
       }
-      fsApi.mkdirSync(parsed.cwd, { recursive: true });
+      try {
+        fsApi.mkdirSync(parsed.cwd, { recursive: true });
+      } catch (err) {
+        log.error('目录创建失败', { cwd: parsed.cwd, message: errMessage(err) });
+        await api.sendCard(chatId, cards.errorCard({
+          title: '目录创建失败',
+          text: `没能创建默认目录：\n\`${parsed.cwd}\`\n\n${errMessage(err)}`,
+        }));
+        return null;
+      }
     }
 
     const record = newRecord({
@@ -136,7 +154,18 @@ function createManager({
       agent,
     });
     store.upsert(record);
-    spawn(record);
+    try {
+      spawn(record);
+    } catch (err) {
+      sessions.delete(record.id);
+      store.remove(record.id);
+      log.error('会话启动失败', { sessionId: record.id, message: errMessage(err) });
+      await api.sendCard(chatId, cards.errorCard({
+        title: '启动失败',
+        text: `没能把终端拉起来：\n\`${errMessage(err)}\`\n\n再发一次试试。`,
+      }));
+      return null;
+    }
 
     await api.sendCard(chatId, cards.noticeCard({
       title: '✅ 已开工',
@@ -154,7 +183,21 @@ function createManager({
     const chatId = await api.createGroup(chatName, [config.ownerOpenId]);
     const record = newRecord({ chatId, chatName, cwd, alias, agent });
     store.upsert(record);
-    spawn(record);
+    try {
+      spawn(record);
+    } catch (err) {
+      sessions.delete(record.id);
+      store.remove(record.id);
+      const message = errMessage(err);
+      log.error('会话启动失败', { sessionId: record.id, message });
+      try {
+        await api.disbandChat(chatId);
+      } catch (e) {
+        // 解散空群失败不掩盖原始错误
+        log.warn('解散空群失败', { chatId, message: errMessage(e) });
+      }
+      throw new Error(`会话启动失败：${message}`);
+    }
     await api.sendText(chatId, '会话已创建，可以从手机说话了。');
     return record;
   }
