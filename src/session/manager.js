@@ -558,14 +558,15 @@ function createManager({
       return;
     }
 
-    if (!ps || ['error', 'closed', 'closing'].includes(record.status)) {
-      await api.sendText(chatId, '这个会话已经停了，回复「重来」重新开一轮。');
-      return;
-    }
-    if (record.status === 'interrupted') {
+    // 重启后内存里的 PTY 已经没了，interrupted 必须先于「已停」守卫处理
+    if (record.status === 'interrupted' && !ps) {
       const ok = await revive(record);
       if (!ok) return;
       ps = sessions.get(record.id);
+    }
+    if (!ps || ['error', 'closed', 'closing'].includes(record.status)) {
+      await api.sendText(chatId, '这个会话已经停了，回复「重来」重新开一轮。');
+      return;
     }
 
     const pending = forcePending.get(chatId);

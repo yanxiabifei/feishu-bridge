@@ -705,6 +705,7 @@ test('closeSession：主动关闭不会误报进程崩溃', async () => {
 
 test('restoreAll：记录转 interrupted、逐群提示、不拉起 PTY', async () => {
   const { manager, store, calls, spawned, rec } = await started();
+  manager._sessions.clear();   // 模拟 daemon 重启：内存里的 PTY 全没了
 
   const n = await manager.restoreAll();
 
@@ -725,6 +726,7 @@ test('restoreAll：closed 的记录直接清掉', async () => {
 
 test('interrupted 会话收到消息：重开并投递这条消息', async () => {
   const { manager, spawned } = await started();
+  manager._sessions.clear();   // 模拟 daemon 重启：内存里的 PTY 全没了
   await manager.restoreAll();
 
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '接着干', senderOpenId: 'ou_me' });
@@ -737,6 +739,7 @@ test('interrupted + claudeSessionId：重开带着它（--resume 由 launcher �
   const { manager, store, spawned, rec } = await started();
   rec.claudeSessionId = 'cs_1';
   store.save();
+  manager._sessions.clear();   // 模拟 daemon 重启：内存里的 PTY 全没了
   await manager.restoreAll();
 
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
@@ -749,6 +752,7 @@ test('--resume 失败：清掉旧会话 ID，改用新会话重建', async () =>
   const { manager, store, calls, spawned, rec } = await started();
   rec.claudeSessionId = 'cs_1';
   store.save();
+  manager._sessions.clear();   // 模拟 daemon 重启：内存里的 PTY 全没了
   await manager.restoreAll();
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
 
@@ -762,6 +766,7 @@ test('--resume 失败：清掉旧会话 ID，改用新会话重建', async () =>
 
 test('interrupted 状态回「重来」：直接重启，不把「重来」当提示词', async () => {
   const { manager, spawned } = await started();
+  manager._sessions.clear();   // 模拟 daemon 重启：内存里的 PTY 全没了
   await manager.restoreAll();
 
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
@@ -774,6 +779,7 @@ test('resume 成功启动后再崩溃：按普通崩溃处理，不丢会话 ID'
   const { manager, store, calls, spawned, rec } = await started();
   rec.claudeSessionId = 'cs_1';
   store.save();
+  manager._sessions.clear();   // 模拟 daemon 重启：内存里的 PTY 全没了
   await manager.restoreAll();
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
 
