@@ -105,6 +105,13 @@ function setup({
   };
 }
 
+test('createFromPhone：首条消息提 codex → 记录用 codex，提示词去掉那一段', async () => {
+  const { manager, spawned } = setup();
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 用 codex 写个快排' });
+  assert.strictEqual(rec.agent, 'codex');
+  assert.deepStrictEqual(spawned[0].submitted, [{ text: '写个快排', origin: 'phone' }]);
+});
+
 test('createFromPhone：别名命中 → 建记录、起 PTY、提交首条、回已开工卡片', async () => {
   const { manager, store, calls, spawned } = setup();
   const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 加个技能' });
