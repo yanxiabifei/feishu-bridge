@@ -8397,6 +8397,24 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 15. **首句解析的两条已知限制（任务 5）。** 一是盘符路径按空白截断，`D:/work 副本 帮我修` 只会取 `D:/work`——带空格的项目目录请用别名，别用路径；二是分隔符 `SEP` 只认空白与 `,，:：、`，不认 `。！？；`，所以 `卡牌。帮我看看` 不会切出「卡牌」这个别名，会落到默认目录。两条都是计划的显式取舍（正则即契约），v1 不改；若真机上确实别扭，再把中文句末标点并进 `SEP` 并补测试。
 
+16. **`src/paths.js` 的导入写法与计划不同（任务 15）。** 计划任务 15 的参考代码写 `const { paths } = require('../paths')`，但该模块导出的是对象本身（`ROOT, STATE, …` 直接在顶层），没有 `paths` 键。实际写法必须是 `const paths = require('../paths')`，后续任务照此引用。
+
+17. **首句路径不存在时的降级（任务 5）。** `parseFirstMessage` 对 `source: 'path-missing'` 的处理是：不建目录、不猜，直接把**整条原文**当作 prompt 送进默认目录的会话。计划没写这条分支的语义，这里固定为「宁可原文全给模型，也不悄悄丢掉路径片段」。
+
+18. **Codex 的提示符是 `›` 不是 `❯`（任务 12）。** 计划里的屏幕判定只写了 Claude 的 `❯`（U+276F）。实测 Codex 0.166.0 二进制含 17 处 `›`（U+203A）、0 处 `❯`。`screen.js` 的 `PROMPT_RE` 同时接受两个字形，并且必须**锚定行首**（允许前导空白）；裸 `includes` 会被信任对话框和正文里的 `❯` 骗过。
+
+19. **卡片必须用「卡片实体」三件套更新（任务 10）。** 计划任务说明里曾出现 `updateCard` / `updateMessage`，落地以规格 §6 为准：`createCardEntity(card)` 创建，首次 `sendCardEntity(chatId, cardId)` 发出，后续用 `updateCardEntity(cardId, card, seq)` 原地更新。飞书长连接场景下没有别的可靠更新路径。
+
+20. **卡片 2.0 的若干硬约束（任务 10、11）。** `config` 里只能有 `update_multi: true`；`wide_screen_mode` 是 1.0 专属字段，2.0 不许带；行内标签（如 `<font>`）里的 `<` 要写成 `&#60;`，否则卡片 JSON 解析失败；代码围栏连续 3 个以上反引号会破坏渲染，发出前插入 U+200B 打断；页脚用 `<font color='grey'>`。照计划里的 1.0 写法会直接发不出卡片。
+
+21. **日志脱敏只覆盖 `fields`，`event` 必须是固定字符串（任务 8）。** `createLogger` 的 `redact()` 只处理 `fields`，`event` 原样落盘。上一版 IPC 错误日志把 handler 名和错误文本拼进 `event`，真实探针确认 token 明文进了 JSONL。已改为 `log.warn('ipc.handler_error', { handler, error })`，handler 名再经白名单收敛。**后续任何模块都不许往 `event` 里拼动态内容**，作为硬规则。
+
+22. **hook-stop 的看门狗不能靠「收到响应头就返回」代替（任务 7）。** 修 bug 时实测：只删掉 `BUDGET_MS` 看门狗，drip 测试仍然绿——因为「收到响应头就 `res.destroy()`」独立地解开了挂起；只有换回原始实现才能让测试变红。结论：看门狗作为绝对兜底保留（`BUDGET_MS=1800` 同步设置、`unref()`、`finally` 清除、所有路径 `exit 0`、stdout 为空），测试需能区分这两层。
+
+23. **富文本里的代码块必须保持原文（任务 23）。** `post` 富文本解析会把 `code_block` 的文本和普通文本一起过 `stripMentions` + 空白压缩，实测 4 个空格变 1 个、3 个换行变 2 个、`@_user_1` 被删——代码直接坏掉。已改为 `code_block` 跳过剥离与归一化，并补保真测试。
+
+24. **SDK 1.77.0 的日志开关有 falsy 陷阱（任务 13）。** `lib/index.js` 里是 `new LoggerProxy(params.loggerLevel || LoggerLevel.info, ...)`，`fatal = 0` 是 falsy，只设级别会被回落成 `info`，长连接一启动就往 stdout 打 `[info]: [ 'event-dispatch is ready' ]`。必须**同时**注入一个五方法 noop logger；`WSClient` 那边是解构默认值（只有 `undefined` 才回落），传 0 有效。测试要同时锁定「级别 = 0」和「注入了 logger」。
+
 ---
 
 ## 8. 计划完成状态
