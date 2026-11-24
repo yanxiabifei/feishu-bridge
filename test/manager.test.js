@@ -60,8 +60,10 @@ function setup({
         ps.submitted.push(item);
         return ps.pushResult || 'queued';
       },
-      onPcKeys() {},
+      onPcKeys(data) { (ps.keys || (ps.keys = [])).push(data); },
+      resize(cols, rows) { (ps.resized || (ps.resized = [])).push([cols, rows]); },
       needsConfirm() { return ps.confirm; },
+      snapshot() { return { id: o.session.id, chatId: o.session.chatId, agent: o.session.agent, cwd: o.session.cwd }; },
       get screen() {
         return {
           snapshot(opts) {
@@ -822,4 +824,52 @@ test('restoreAll：落盘失败不中断恢复，其余会话照常标记', asyn
   assert.strictEqual(store.get(second.id).ptyPid, null);
   const prompts = calls.filter((c) => c[0] === 'sendText' && c[2] === '电脑重启了，回一条消息我就接上。');
   assert.strictEqual(prompts.length, 2);
+});
+
+test('onPcKeys：转发电脑按键，忽略空数据与未知会话', async () => {
+  const { manager, spawned } = await started();
+  const id = spawned[0].session.id;
+  manager.onPcKeys({ sessionId: id, data: 'a' });
+  manager.onPcKeys({ sessionId: id, data: '' });
+  manager.onPcKeys({ sessionId: id });
+  manager.onPcKeys({ sessionId: 'nope', data: 'b' });
+  assert.deepStrictEqual(spawned[0].keys, ['a']);
+});
+
+test('onPcResize：转发合法尺寸，忽略非法尺寸与未知会话', async () => {
+  const { manager, spawned } = await started();
+  const id = spawned[0].session.id;
+  manager.onPcResize({ sessionId: id, cols: 120, rows: 40 });
+  manager.onPcResize({ sessionId: id, cols: 0, rows: 40 });
+  manager.onPcResize({ sessionId: 'nope', cols: 10, rows: 10 });
+  assert.deepStrictEqual(spawned[0].resized, [[120, 40]]);
+});
+
+test('list：活会话叠加快照，退出后状态为 error', async () => {
+  const { manager, spawned, rec } = await started();
+  const live = manager.list().find((s) => s.id === rec.id);
+  assert.strictEqual(live.status, 'idle');
+  assert.strictEqual(live.cwd, 'D:/card');
+
+  spawned[0].emit({ type: 'exit', code: 1 });
+  await manager._drain();
+  const dead = manager.list().find((s) => s.id === rec.id);
+  assert.strictEqual(dead.status, 'error');
+});
+
+test('shutdown：杀 PTY、标记 interrupted、不解散群也不推崩溃卡', async () => {
+  const { manager, calls, store, spawned, rec } = await started();
+  calls.length = 0;   // 清掉建会话时的「已开工」卡，只看停机阶段发出的调用
+  spawned[0].kill = () => {
+    spawned[0].killed = true;
+    spawned[0].emit({ type: 'exit', code: 1 });
+  };
+  await manager.shutdown();
+  await manager._drain();
+
+  assert.strictEqual(spawned[0].killed, true);
+  assert.strictEqual(store.get(rec.id).status, 'interrupted');
+  assert.strictEqual(store.get(rec.id).ptyPid, null);
+  assert.ok(!calls.some((c) => c[0] === 'disbandChat'));
+  assert.ok(!calls.some((c) => c[0] === 'sendCard'));
 });
