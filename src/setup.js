@@ -67,10 +67,10 @@ function createSetup({
       return { ok: false, steps };
     }
 
-    const api = createApi({ appId, appSecret, log });
+    const api = createApi({ appId, appSecret });
 
     try {
-      await api.token();
+      await api.getToken();
       record('换取 tenant_access_token', true, '凭据有效');
     } catch (err) {
       record('换取 tenant_access_token', false, `${err.message}${hintFor(err)}`);
@@ -94,7 +94,11 @@ function createSetup({
       log,
       handlers: { onMessage: (evt) => resolveMsg(evt) },
     });
-    ws.start();
+    let wsStartError = null;
+    Promise.resolve(ws.start()).catch((err) => {
+      wsStartError = err;
+      resolveMsg(null);
+    });
 
     let evt;
     try {
@@ -104,7 +108,12 @@ function createSetup({
         `${err.message}。请检查：订阅了 im.message.receive_v1、连接方式选「长连接」、应用已发布且你自己可用`);
       return { ok: false, steps };
     } finally {
-      ws.close();
+      Promise.resolve(ws.close()).catch(() => {});
+    }
+
+    if (wsStartError) {
+      record('长连接收到消息', false, `长连接启动失败：${wsStartError.message}`);
+      return { ok: false, steps };
     }
 
     const chatId = evt && evt.message && evt.message.chat_id;
@@ -170,4 +179,4 @@ function createSetup({
   return { run };
 }
 
-module.exports = { createSetup, APP_ID_RE };
+module.exports = { createSetup };

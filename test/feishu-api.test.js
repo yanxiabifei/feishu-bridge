@@ -63,6 +63,23 @@ test('token 被缓存：两次调用只取一次 token', async () => {
   assert.strictEqual(tokenCalls.length, 1);
 });
 
+test('公开接口暴露 getToken：返回 token、请求正确路径且命中缓存', async () => {
+  const { api, calls } = apiWith(({ url }) => (
+    tokenRoute(url) || { code: 0, msg: 'ok', data: {} }
+  ));
+  assert.strictEqual(typeof api.getToken, 'function');
+  assert.strictEqual(await api.getToken(), 't-1');
+
+  const tokenCalls = calls.filter(
+    (c) => c.url === 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+  );
+  assert.strictEqual(tokenCalls.length, 1);
+  assert.strictEqual(tokenCalls[0].opts.method, 'POST');
+
+  assert.strictEqual(await api.getToken(), 't-1');
+  assert.strictEqual(calls.length, 1); // 二次调用命中缓存，不重复请求
+});
+
 test('token 过期后自动刷新', async () => {
   const { api, calls, advance } = apiWith(({ url }) => (
     tokenRoute(url) || { code: 0, msg: 'ok', data: { message_id: 'om_1' } }
