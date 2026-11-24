@@ -12,6 +12,7 @@ function harness(overrides = {}) {
   let dataHandler = () => {};
   let exitHandler = () => {};
   let ready = true;
+  let clock = 1000;
 
   const pty = {
     pid: 4242,
@@ -35,7 +36,7 @@ function harness(overrides = {}) {
   let inBox = true;
 
   const session = {
-    id: 's1', agent: 'claude', cwd: 'D:/w', status: 'idle', inputSeq: 0, lastInput: null,
+    id: 's1', agent: overrides.agent || 'claude', cwd: 'D:/w', status: 'idle', inputSeq: 0, lastInput: null,
   };
 
   const ps = createPtySession({
@@ -52,7 +53,7 @@ function harness(overrides = {}) {
     queueFactory: createQueue,
     log: { info() {}, warn() {}, error() {} },
     onEvent: (e) => { events.push(e); order.push('event'); },
-    now: () => 1000,
+    now: () => clock,
   });
 
   return {
@@ -60,6 +61,7 @@ function harness(overrides = {}) {
     screenText() { return lastScreen; },
     setReady(v) { ready = v; },
     setInBox(v) { inBox = v; },
+    setNow(v) { clock = v; },
     emitData(d) { dataHandler(d); },
     emitExit(code) { exitHandler({ exitCode: code }); },
   };
@@ -500,4 +502,160 @@ test('就绪时先派发 ready 再写出排队 turn（turn-start 在后）', () 
   const turnIdx = h.events.findIndex((e) => e.type === 'turn-start');
   assert.ok(readyIdx >= 0 && turnIdx >= 0);
   assert.ok(readyIdx < turnIdx, `ready(${readyIdx}) 应在 turn-start(${turnIdx}) 之前`);
+});
+
+// ---- Codex 轮次结束判定（无 Stop hook，靠画面静默稳定） ----
+
+test('codex 轮次结束：画面静默稳定后派发 turn-end 并回到 idle', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('写个快排', 'phone');
+
+  h.ps._pollReady();
+  h.ps._pollReady();
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0); // 还没过 1.5s
+
+  h.setNow(7000);
+  h.ps._pollReady();
+  h.ps._pollReady();
+  h.ps._pollReady();
+
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
+  assert.strictEqual(h.ps.status, 'idle');
+});
+
+test('codex 还在刷屏时不判结束', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('写个快排', 'phone');
+  h.setReady(false);
+
+  h.setNow(9000);
+  for (let i = 0; i < 10; i += 1) h.ps._pollReady();
+
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0);
+  assert.strictEqual(h.ps.status, 'running');
+});
+
+test('codex 画面停在菜单（不在输入框）时不判结束', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('写个快排', 'phone');
+  h.setInBox(false);
+
+  h.setNow(9000);
+  for (let i = 0; i < 10; i += 1) h.ps._pollReady();
+
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0);
+});
+
+test('claude 会话不会误发 turn-end（它走 Stop hook）', () => {
+  const h = harness({ agent: 'claude' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('你好', 'phone');
+
+  h.setNow(9000);
+  for (let i = 0; i < 10; i += 1) h.ps._pollReady();
+
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0);
+  assert.strictEqual(h.ps.status, 'running');
+});
+
+test('codex 电脑端手打 Enter 进入 running 后同样计时判定结束', () => {
+  const h = harness({ agent: 'codex', inputLine: 'abc' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.onPcKeys('abc\r');
+  assert.strictEqual(h.ps.status, 'running');
+
+  h.setNow(6000); // 距写入仅 1000ms，未满 1.5s
+  for (let i = 0; i < 5; i += 1) h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0);
+
+  h.setNow(7000); // 距写入 2000ms，满 1.5s
+  h.ps._pollReady();
+  h.ps._pollReady();
+  h.ps._pollReady();
+
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
+  assert.strictEqual(h.ps.status, 'idle');
+});
+
+// ---- 任务20 修复：turn-end 必须先于下一条 turn-start ----
+
+test('codex 连发两条时先发 turn-end 再泵出队列里的下一条 turn-start', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('先写 A', 'phone');
+  h.ps.submitText('再写 B', 'phone');
+  assert.strictEqual(h.ps._queue.pending(), 1); // B 在队列里等 A 结束
+
+  h.setNow(7000); // 距 A 开始 2000ms，满 1.5s
+  h.ps._pollReady();
+  h.ps._pollReady();
+  h.ps._pollReady();
+
+  const types = h.events.map((e) => e.type);
+  const endIdx = types.indexOf('turn-end');
+  const nextStartIdx = types.indexOf('turn-start', endIdx + 1);
+  assert.ok(endIdx >= 0, '应派发 turn-end');
+  assert.ok(
+    nextStartIdx > endIdx,
+    `下一条 turn-start(${nextStartIdx}) 必须在 turn-end(${endIdx}) 之后`,
+  );
+  assert.deepStrictEqual(types.slice(-2), ['turn-end', 'turn-start']);
+  assert.strictEqual(h.ps.status, 'running'); // B 已被泵出，会话继续运行
+});
+
+test('codex 稳定性必须连续：中途一次不稳定会重置计数', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('写个快排', 'phone');
+
+  h.setNow(7000);
+  h.ps._pollReady();
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0); // 才 2 次稳定
+
+  h.setInBox(false);
+  h.ps._pollReady(); // 不稳定，计数清零
+  h.setInBox(true);
+
+  h.ps._pollReady();
+  h.ps._pollReady();
+  assert.strictEqual(
+    h.events.filter((e) => e.type === 'turn-end').length,
+    0,
+    '重置后仅 2 次稳定不应结束',
+  );
+  assert.strictEqual(h.ps.status, 'running');
+
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
+  assert.strictEqual(h.ps.status, 'idle');
+});
+
+test('codex 回到 idle 后继续轮询不会重复派发 turn-end（running 守卫）', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('写个快排', 'phone');
+
+  h.setNow(7000);
+  h.ps._pollReady();
+  h.ps._pollReady();
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
+  assert.strictEqual(h.ps.status, 'idle');
+
+  h.setNow(9000);
+  for (let i = 0; i < 5; i += 1) h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
 });

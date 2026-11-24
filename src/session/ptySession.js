@@ -1,6 +1,8 @@
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 const READY_POLL_MS = 200;
+const CODEX_MIN_TURN_MS = 1500;   // 刚写进去的这段不判结束
+const CODEX_SETTLE_POLLS = 3;     // 静默稳定连续 3 次探测（200ms × 3）
 
 function createPtySession({
   session, launch, ptyFactory, screenFactory, queueFactory, log, onEvent,
@@ -12,6 +14,8 @@ function createPtySession({
   let disposed = false;
   let exitEmitted = false;
   let screenDisposed = false;
+  let runningSince = 0;
+  let settlePolls = 0;
 
   const screen = screenFactory({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
   const emit = (e) => onEvent({ sessionId: session.id, ...e });
@@ -47,6 +51,8 @@ function createPtySession({
       session.status = 'idle';
       throw err;
     }
+    runningSince = now();
+    settlePolls = 0;
     emit({ type: 'turn-start', seq: item.seq, origin: item.origin, text: item.text });
   }
 
@@ -70,6 +76,16 @@ function createPtySession({
     }
     if (status === 'idle' && queue.pending() > 0 && !queue.inFlight()) {
       queue.release();
+    }
+    // Codex 没有 Stop hook：画面静默稳定且回到输入框，就认为这一轮结束了
+    if (status === 'running' && session.agent === 'codex') {
+      const stable = screen.isReady() && screen.inInputBox() && now() - runningSince >= CODEX_MIN_TURN_MS;
+      settlePolls = stable ? settlePolls + 1 : 0;
+      if (settlePolls >= CODEX_SETTLE_POLLS) {
+        settlePolls = 0;
+        emit({ type: 'turn-end' });
+        releaseTurn();
+      }
     }
   }
 
@@ -134,11 +150,14 @@ function createPtySession({
       session.lastInput = { seq, origin: 'pc', text: screen.inputLine(), at: now() };
       status = 'running';
       session.status = 'running';
+      runningSince = now();
+      settlePolls = 0;
       emit({ type: 'pc-input', input: session.lastInput });
     }
   }
 
   function releaseTurn() {
+    settlePolls = 0;
     if (disposed || status === 'closed' || status !== 'running') return;
     status = 'idle';
     session.status = 'idle';
