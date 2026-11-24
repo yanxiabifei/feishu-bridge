@@ -132,10 +132,13 @@ function createScreen({
     inInputBox() {
       if (disposed) return false;
       const lines = inputTail(30);
-      // 菜单/确认弹窗的提示关键字：只要出现在尾部就不当作输入框
-      if (lines.some((line) => MENU_RE.test(line.text))) return false;
       const idx = lastPromptIndex(lines);
       if (idx < 0) return false;
+      // 菜单/确认弹窗的提示关键字：只扫描提示符下方的非折行页脚。
+      // 草稿本身（提示符行）和自动折行产生的续行都属于输入内容，不能拿来判菜单。
+      for (let i = idx + 1; i < lines.length; i += 1) {
+        if (!lines[i].wrapped && MENU_RE.test(lines[i].text)) return false;
+      }
       // 提示符之后的每个非空物理行，要么是折行续行，要么是状态页脚；
       // 弹窗选项（"Yes, I trust this folder"）与菜单项（"2. No..."）都不满足。
       for (let i = idx + 1; i < lines.length; i += 1) {

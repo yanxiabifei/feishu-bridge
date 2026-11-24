@@ -169,6 +169,41 @@ test('inInputBox 允许状态页脚位于提示符行下方', () => {
   assert.strictEqual(screen.inInputBox(), true);
 });
 
+test('inInputBox：草稿中提及菜单关键字不被误判', () => {
+  const { screen, terminal } = setup();
+  terminal().lines = [
+    '❯ please explain "enter to confirm"',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)   ? for shortcuts',
+  ];
+  terminal().buffer.active.cursorY = 1;
+  assert.strictEqual(screen.inInputBox(), true);
+});
+
+test('inInputBox：草稿折行续行含菜单关键字不被误判', () => {
+  const { screen, terminal } = setup();
+  terminal().lines = ['❯ 第一行', 'esc to cancel 只是草稿的自动折行续行'];
+  terminal().wrapped.add(1);
+  terminal().buffer.active.cursorY = 1;
+  assert.strictEqual(screen.inInputBox(), true);
+});
+
+test('inInputBox：真实菜单页脚被识别为菜单', () => {
+  const { screen, terminal } = setup();
+  terminal().lines = ['❯ 1. Yes', 'Press enter to confirm or esc to cancel'];
+  terminal().buffer.active.cursorY = 1;
+  assert.strictEqual(screen.inInputBox(), false);
+});
+
+test('inInputBox：菜单页脚同时带快捷键提示仍识别为菜单', () => {
+  const { screen, terminal } = setup();
+  terminal().lines = [
+    '❯ 1. Yes',
+    '  ↑/↓ to navigate · enter to select · esc to cancel · ctrl+c to exit',
+  ];
+  terminal().buffer.active.cursorY = 1;
+  assert.strictEqual(screen.inInputBox(), false);
+});
+
 test('write 未解析完成时 isReady 为 false', () => {
   let finish;
   let clock = 10_000;
