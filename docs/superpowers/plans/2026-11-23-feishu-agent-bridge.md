@@ -8443,6 +8443,8 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 38. **任务 21 复审后收紧 codex 识别（偏离计划原文，已改）。** 计划给出的 `AGENT_LEAD`/`AGENT_VERB` 无词边界、VERB 不锚句首，且 VERB 分支 `.replace(/\s+/g,' ')` 会压掉 prompt 换行。质量审查实测三个反例：`'这个功能用 codex 实现过'` 被判为指定、`'codexwriter 是什么'`/`'codex-cli 怎么装'` 被判为指定、多行 prompt 的换行丢失。已改为：两个正则都在 `codex` 后加 `(?![A-Za-z0-9_-])`，`AGENT_VERB` 加 `^\s*` 锚定；VERB 分支只 `.trim()`。别名/路径分支剥前缀后正文本身以「用 codex」开头，原 11 条用例全绿。已知边界（可接受）：default 分支前导中文标点（`'，用 codex 写'`）不识别，属既有 SEP 处理范围外；`'用 codex-1号 写'` 因 lookahead 不识别。测试新增 4 条（句中提及、`codexwriter`/`codex-cli`、换行保留、`codex，` 防回归）；router 15、manager 57、全量 284。
 
+39. **任务 22 复审后的转义加固（必须修的注入缺陷）。** 质量审查发现新增的「画面推送卡」`screenOutputCard` 与「完整画面」`fullScreenCard` 直接用 `md('```\n' + truncate(text) + '\n```')` 拼代码块：终端输出里只要出现三个反引号就会提前闭合围栏，后续内容（例如 Codex 输出里的 `<at id=all></at>`）会被当作真卡片语法解析，等于把 @所有人 的按钮交给终端输出。`lead`（电脑端输入回显）同理未转义。已改为与既有 `screenCard` 一致的三层写法：`neutralizeFences(escapeText(truncate(...)))`（围栏内插 U+200B 打断、`<` → `&#60;`），`lead` 走 `md(escapeText(lead))`。另修两处：完整画面的 `lines` 参数用 `Math.floor` 取整（`'40.5'` 会令 `buf.getLine(40.5)` 取不到行），`pushScreenOutput` 的状态守卫补齐 `'interrupted'` 与完整画面分支一致——该守卫因有更早的分支拦截，属不可达状态，测试无法覆盖，靠阅读守护。新增 4 条真红用例（围栏闭合 ×3、`'40.5'`）+ 3 条回归守卫；cards 20、manager 64、全量 297。
+
 ---
 
 ## 8. 计划完成状态
