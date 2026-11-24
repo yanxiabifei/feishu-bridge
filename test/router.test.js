@@ -95,3 +95,29 @@ test('正文里只是提到 codex 时不改 agent', () => {
   assert.strictEqual(r.agent, null);
   assert.strictEqual(r.prompt, '看看 codex 的配置文件在哪');
 });
+
+test('句中顺口说「用 codex」不算指定，agent 保持 null', () => {
+  const r = parseFirstMessage('这个功能用 codex 实现过', base);
+  assert.strictEqual(r.agent, null);
+  assert.strictEqual(r.prompt, '这个功能用 codex 实现过');
+});
+
+test('codex 后面紧跟英文/数字/连字符不算指定（codexwriter、codex-cli）', () => {
+  for (const msg of ['codexwriter 是什么', 'codex-cli 怎么装']) {
+    const r = parseFirstMessage(msg, base);
+    assert.strictEqual(r.agent, null);
+    assert.strictEqual(r.prompt, msg);
+  }
+});
+
+test('剥掉「用 codex」后保留 prompt 的换行与原有空白', () => {
+  const r = parseFirstMessage('用 codex 写个快排\n\n要求：用递归', base);
+  assert.strictEqual(r.agent, 'codex');
+  assert.strictEqual(r.prompt, '写个快排\n\n要求：用递归');
+});
+
+test('句首 codex 后面跟中文/标点仍能识别', () => {
+  const r = parseFirstMessage('codex，写个快排', base);
+  assert.strictEqual(r.agent, 'codex');
+  assert.strictEqual(r.prompt, '，写个快排');
+});

@@ -2,8 +2,8 @@ const SEP = /^[\s,，:：、]+/;
 const ALIAS_MAX = 6;
 
 // 「用 codex」「走 codex」「codex：」这类明确指名才算，正文里顺口提到不算
-const AGENT_LEAD = /^\s*codex\s*(?:模式)?\s*[:：]?\s*/i;
-const AGENT_VERB = /(?:用|使用|走)\s*codex\s*(?:模式)?\s*[:：]?\s*/i;
+const AGENT_LEAD = /^\s*codex(?![A-Za-z0-9_-])\s*(?:模式)?\s*[:：]?\s*/i;
+const AGENT_VERB = /^\s*(?:用|使用|走)\s*codex(?![A-Za-z0-9_-])\s*(?:模式)?\s*[:：]?\s*/i;
 
 function splitAgent(prompt) {
   const text = String(prompt || '');
@@ -11,7 +11,7 @@ function splitAgent(prompt) {
     return { agent: 'codex', prompt: text.replace(AGENT_LEAD, '').trim() };
   }
   if (AGENT_VERB.test(text)) {
-    return { agent: 'codex', prompt: text.replace(AGENT_VERB, '').replace(/\s+/g, ' ').trim() };
+    return { agent: 'codex', prompt: text.replace(AGENT_VERB, '').trim() };
   }
   return { agent: null, prompt: text };
 }
