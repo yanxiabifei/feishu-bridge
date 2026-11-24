@@ -378,7 +378,7 @@ function createManager({
   async function pushScreenOutput(record) {
     if (record.agent !== 'codex') return;
     const ps = sessions.get(record.id);
-    if (!ps || ['error', 'closed', 'closing'].includes(record.status)) return;
+    if (!ps || ['error', 'closed', 'closing', 'interrupted'].includes(record.status)) return;
     let snap = '';
     try {
       snap = ps.screen.snapshot({ lines: 40 });
@@ -493,7 +493,7 @@ function createManager({
         await api.sendText(chatId, '会话已经停了，看不到完整画面了。');
         return;
       }
-      const lines = Math.min(Math.max(Number(action.lines) || 200, 40), 500);
+      const lines = Math.min(Math.max(Math.floor(Number(action.lines)) || 200, 40), 500);
       let snap = '';
       try {
         snap = ps.screen.snapshot({ lines });

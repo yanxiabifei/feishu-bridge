@@ -860,3 +860,55 @@ test('onCardAction：会话已停时 full-screen 回提示', async () => {
   await manager.onCardAction({ chatId: 'oc_1', openId: 'ou_me', action: { act: 'full-screen' } });
   assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('会话已经停了')));
 });
+
+test('codex 画面推送：claude 会话收到 turn-end 不推画面卡', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  assert.strictEqual(rec.agent, 'claude');
+
+  spawned[0].emit({ type: 'turn-end' });
+  await manager._drain();
+
+  const pushed = calls.filter((c) => c[0] === 'sendCard'
+    && c[2].header && c[2].header.title.content.includes('Codex 输出'));
+  assert.strictEqual(pushed.length, 0, 'claude 会话不得推 codex 画面卡');
+});
+
+test('onCardAction：interrupted 会话 full-screen 只回提示，不推卡', async () => {
+  const { manager, store, calls, rec } = await started();
+  store.get(rec.id).status = 'interrupted';
+  const before = calls.length;
+
+  await manager.onCardAction({ chatId: 'oc_1', openId: 'ou_me', action: { act: 'full-screen' } });
+
+  assert.ok(calls.slice(before).some((c) => c[0] === 'sendText'
+    && c[2] === '会话已经停了，看不到完整画面了。'));
+  assert.strictEqual(calls.slice(before).filter((c) => c[0] === 'sendCard').length, 0);
+});
+
+test('onCardAction：full-screen 的 lines 取整并夹取到 [40, 500]', async () => {
+  const { manager, spawned } = await started();
+
+  for (const [input, expected] of [['40.5', 40], [1000, 500], ['abc', 200]]) {
+    await manager.onCardAction({
+      chatId: 'oc_1', openId: 'ou_me', action: { act: 'full-screen', lines: input },
+    });
+    assert.strictEqual(spawned[0].snapshotOpts.lines, expected, `lines=${input}`);
+    assert.ok(Number.isInteger(spawned[0].snapshotOpts.lines), 'lines 必须是整数');
+  }
+});
+
+test('codex turn-end：取画面抛错时不推卡也不抛', async () => {
+  const h = setup();
+  await h.manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 codex 写个快排' });
+  const ps = h.spawned[0];
+  ps.emit({ type: 'ready' });
+  Object.defineProperty(ps, 'screen', {
+    get: () => ({ snapshot() { throw new Error('boom'); } }),
+  });
+  const before = h.calls.length;
+
+  ps.emit({ type: 'turn-end' });
+  await assert.doesNotReject(h.manager._drain());
+
+  assert.strictEqual(h.calls.slice(before).filter((c) => c[0] === 'sendCard').length, 0);
+});

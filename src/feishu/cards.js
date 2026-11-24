@@ -106,8 +106,8 @@ function screenOutputCard({ lead, text, agent, cwd }) {
     title: '🖥 Codex 输出',
     template: 'turquoise',
     elements: elements(
-      lead ? md(lead) : null,
-      md('```\n' + truncate(text || '（无画面）', 6000).text + '\n```'),
+      lead ? md(escapeText(lead)) : null,
+      md('```\n' + neutralizeFences(escapeText(truncate(text || '（无画面）', 6000).text)) + '\n```'),
       {
         tag: 'button',
         text: { tag: 'plain_text', content: '查看完整画面' },
@@ -123,7 +123,7 @@ function fullScreenCard({ text, lines }) {
   return card({
     title: `🖥 最近 ${lines} 行`,
     template: 'turquoise',
-    elements: elements(md('```\n' + truncate(text || '（无画面）', 6000).text + '\n```')),
+    elements: elements(md('```\n' + neutralizeFences(escapeText(truncate(text || '（无画面）', 6000).text)) + '\n```')),
   });
 }
 
