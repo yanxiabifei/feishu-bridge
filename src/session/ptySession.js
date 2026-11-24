@@ -83,8 +83,8 @@ function createPtySession({
       settlePolls = stable ? settlePolls + 1 : 0;
       if (settlePolls >= CODEX_SETTLE_POLLS) {
         settlePolls = 0;
-        releaseTurn();
         emit({ type: 'turn-end' });
+        releaseTurn();
       }
     }
   }

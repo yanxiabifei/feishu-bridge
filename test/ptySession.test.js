@@ -585,3 +585,77 @@ test('codex 电脑端手打 Enter 进入 running 后同样计时判定结束', (
   assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
   assert.strictEqual(h.ps.status, 'idle');
 });
+
+// ---- 任务20 修复：turn-end 必须先于下一条 turn-start ----
+
+test('codex 连发两条时先发 turn-end 再泵出队列里的下一条 turn-start', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('先写 A', 'phone');
+  h.ps.submitText('再写 B', 'phone');
+  assert.strictEqual(h.ps._queue.pending(), 1); // B 在队列里等 A 结束
+
+  h.setNow(7000); // 距 A 开始 2000ms，满 1.5s
+  h.ps._pollReady();
+  h.ps._pollReady();
+  h.ps._pollReady();
+
+  const types = h.events.map((e) => e.type);
+  const endIdx = types.indexOf('turn-end');
+  const nextStartIdx = types.indexOf('turn-start', endIdx + 1);
+  assert.ok(endIdx >= 0, '应派发 turn-end');
+  assert.ok(
+    nextStartIdx > endIdx,
+    `下一条 turn-start(${nextStartIdx}) 必须在 turn-end(${endIdx}) 之后`,
+  );
+  assert.deepStrictEqual(types.slice(-2), ['turn-end', 'turn-start']);
+  assert.strictEqual(h.ps.status, 'running'); // B 已被泵出，会话继续运行
+});
+
+test('codex 稳定性必须连续：中途一次不稳定会重置计数', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('写个快排', 'phone');
+
+  h.setNow(7000);
+  h.ps._pollReady();
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0); // 才 2 次稳定
+
+  h.setInBox(false);
+  h.ps._pollReady(); // 不稳定，计数清零
+  h.setInBox(true);
+
+  h.ps._pollReady();
+  h.ps._pollReady();
+  assert.strictEqual(
+    h.events.filter((e) => e.type === 'turn-end').length,
+    0,
+    '重置后仅 2 次稳定不应结束',
+  );
+  assert.strictEqual(h.ps.status, 'running');
+
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
+  assert.strictEqual(h.ps.status, 'idle');
+});
+
+test('codex 回到 idle 后继续轮询不会重复派发 turn-end（running 守卫）', () => {
+  const h = harness({ agent: 'codex' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('写个快排', 'phone');
+
+  h.setNow(7000);
+  h.ps._pollReady();
+  h.ps._pollReady();
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
+  assert.strictEqual(h.ps.status, 'idle');
+
+  h.setNow(9000);
+  for (let i = 0; i < 5; i += 1) h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 1);
+});
