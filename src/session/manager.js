@@ -102,7 +102,7 @@ function createManager({
       enqueueWork(() => startProcessingCard(record, e, turn));
     }
     if (e.type === 'exit' && record.status === 'error') {
-      if (record.resuming) enqueueWork(() => retryWithoutResume(record, e));
+      if (record.resuming) enqueueWork(() => retryWithoutResume(record));
       else enqueueWork(() => notifyCrash(record, e));
     }
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
@@ -467,7 +467,11 @@ function createManager({
     let restored = 0;
     for (const record of records) {
       if (record.status === 'closed') {
-        store.remove(record.id);
+        try {
+          store.remove(record.id);
+        } catch (err) {
+          log.warn('清理旧记录失败', { sessionId: record.id, message: String((err && err.message) || err) });
+        }
         continue;
       }
       record.status = 'interrupted';
@@ -479,24 +483,35 @@ function createManager({
         log.warn('重启提示发送失败', { chatId: record.chatId, message: String((err && err.message) || err) });
       }
     }
-    store.save();
+    try {
+      store.save();
+    } catch (err) {
+      log.warn('重启状态落盘失败', { message: String((err && err.message) || err) });
+    }
     return restored;
   }
 
   // --resume 起不来（记录被删/版本不对）时的兜底：丢掉旧会话 ID，新开一个。
   async function retryWithoutResume(record) {
+    // 排队期间会话可能已被解散/移除，记录不在了就别再拉起新 PTY
+    if (store.get(record.id) !== record) return;
     record.resuming = false;
     record.claudeSessionId = null;
     record.transcriptPath = null;
     record.status = 'starting';
-    store.save();
+    try {
+      store.save();
+    } catch (err) {
+      log.warn('重建状态落盘失败', { sessionId: record.id, message: String((err && err.message) || err) });
+    }
+    // 先拉起新 PTY 再发提示：await 期间若用户发消息，必须写进新 PTY 而不是已退出的旧 PTY
+    spawn(record);
+    ipc?.broadcast({ type: 'session', session: record });
     try {
       await api.sendText(record.chatId, '上次的对话记录不在了，改用新会话重建。');
     } catch (err) {
       log.warn('重建提示发送失败', { chatId: record.chatId, message: String((err && err.message) || err) });
     }
-    spawn(record);
-    ipc?.broadcast({ type: 'session', session: record });
   }
 
   // 由 daemon 每 30s 调一次（任务 21 装配时起定时器）：兜住丢失的解散事件。

@@ -793,3 +793,26 @@ test('resume 成功启动后再崩溃：按普通崩溃处理，不丢会话 ID'
   assert.ok(calls.some((c) => c[0] === 'sendCard' && c[2].header.title.content.includes('进程异常退出')));
   assert.ok(!calls.some((c) => c[0] === 'sendText' && c[2].includes('改用新会话重建')));
 });
+
+test('restoreAll：落盘失败不中断恢复，其余会话照常标记', async () => {
+  const h = await started();
+  const { manager, store, calls } = h;
+  const second = { ...h.rec, id: 's_second', chatId: 'oc_second' };
+  store.upsert(second);
+  const closed = { ...h.rec, id: 's_closed', chatId: 'oc_closed', status: 'closed' };
+  store.upsert(closed);
+  store.remove = () => { throw new Error('disk full'); };
+  store.save = () => { throw new Error('disk full'); };
+  manager._sessions.clear();   // 模拟 daemon 重启：内存里的 PTY 全没了
+
+  let restored;
+  await assert.doesNotReject(async () => {
+    restored = await manager.restoreAll();
+  });
+
+  assert.strictEqual(restored, 2);
+  assert.strictEqual(store.get(second.id).status, 'interrupted');
+  assert.strictEqual(store.get(second.id).ptyPid, null);
+  const prompts = calls.filter((c) => c[0] === 'sendText' && c[2] === '电脑重启了，回一条消息我就接上。');
+  assert.strictEqual(prompts.length, 2);
+});
