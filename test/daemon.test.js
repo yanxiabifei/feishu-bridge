@@ -21,9 +21,9 @@ const CONFIG = {
 
 function makeDeps(over = {}) {
   const calls = {
-    sent: [], text: [], manager: [], order: [],
+    sent: [], text: [], manager: [], control: [], order: [],
     dirs: 0, storeLoaded: 0, redacted: null,
-    managerOpts: null, ipcOpts: null, wsOpts: null,
+    managerOpts: null, controlOpts: null, ipcOpts: null, wsOpts: null,
     apiOpts: null, launchOpts: null, spawnArgs: null,
     screenArgs: null, queueArgs: null,
   };
@@ -57,6 +57,11 @@ function makeDeps(over = {}) {
   const api = {
     sendText: async (chatId, text) => { calls.text.push([chatId, text]); },
   };
+  const control = {
+    onMessage: async (a) => { calls.control.push(['onMessage', a]); },
+    onCardAction: async (a) => { calls.control.push(['onCardAction', a]); },
+    onBotAdded: async (a) => { calls.control.push(['onBotAdded', a]); },
+  };
   const deps = {
     pathsApi: {
       CONFIG: 'C:/state/config.json',
@@ -82,6 +87,7 @@ function makeDeps(over = {}) {
     ipcFactory: async (o) => { calls.ipcOpts = o; ipc.handlers = o.handlers; return ipc; },
     wsFactory: (o) => { calls.wsOpts = o; return ws; },
     managerFactory: (o) => { calls.managerOpts = o; return manager; },
+    controlFactory: (o) => { calls.controlOpts = o; return control; },
     ptySessionFactory: (o) => o,
     ptyModule: { spawn: (...args) => { calls.spawnArgs = args; return { kill() {} }; } },
     launchFn: (o) => { calls.launchOpts = o; return { file: 'fake', args: [], cwd: o.session.cwd }; },
@@ -139,6 +145,8 @@ test('装配：密钥进 redactor，store 先加载，各工厂拿到正确参�
   assert.strictEqual(calls.wsOpts.appSecret, 'sec_1');
   assert.strictEqual(calls.managerOpts.config.appId, CONFIG.appId);
   assert.strictEqual(calls.managerOpts.getProjects().aliases['卡牌'], 'D:/card');
+  assert.strictEqual(calls.controlOpts.ownerOpenId, CONFIG.ownerOpenId);
+  assert.strictEqual(calls.controlOpts.getProjects().aliases['卡牌'], 'D:/card');
   assert.strictEqual(daemon.port, 51000);
 });
 
@@ -166,16 +174,17 @@ test('PTY 工厂：launch 拿到 hook 路径，spawn / 屏幕 / 队列逐个透�
   assert.deepStrictEqual(calls.queueArgs, { limit: 7 });
 });
 
-test('手机文本：p2p 直接转发，群聊必须 @，占位符被剥掉', async () => {
+test('手机文本：私聊进总控面板，群聊必须 @，占位符被剥掉', async () => {
   const { deps, calls } = makeDeps();
   await createDaemon({ deps });
   const onMessage = calls.wsOpts.handlers.onMessage;
 
   onMessage(evt());
-  assert.deepStrictEqual(calls.manager.at(-1), [
-    'onPhoneMessage',
-    { chatId: 'oc_1', text: '你好', media: null, senderOpenId: 'ou_me' },
+  assert.deepStrictEqual(calls.control.at(-1), [
+    'onMessage',
+    { chatId: 'oc_1', text: '你好', senderOpenId: 'ou_me' },
   ]);
+  assert.strictEqual(calls.manager.length, 0);
 
   const before = calls.manager.length;
   onMessage(evt({ chat_type: 'group', content: '{"text":"@_user_1 你好"}' }));
@@ -223,6 +232,46 @@ test('卡片动作与群事件：翻译成 manager 的入参', async () => {
   handlers.onBotRemoved({ chat: { chat_id: 'oc_2' } });
   assert.deepStrictEqual(calls.manager.at(-2), ['onDisbanded', { chatId: 'oc_1' }]);
   assert.deepStrictEqual(calls.manager.at(-1), ['onBotRemoved', { chatId: 'oc_2' }]);
+});
+
+test('卡片动作：alias-rename 进总控面板，其余进 manager', async () => {
+  const { deps, calls } = makeDeps();
+  await createDaemon({ deps });
+  const onCardAction = calls.wsOpts.handlers.onCardAction;
+
+  onCardAction({
+    operator: { open_id: 'ou_me' },
+    action: { value: { act: 'alias-rename', from: '卡牌' } },
+    context: { open_chat_id: 'oc_p2p' },
+  });
+  assert.deepStrictEqual(calls.control.at(-1), [
+    'onCardAction',
+    { chatId: 'oc_p2p', openId: 'ou_me', action: { act: 'alias-rename', from: '卡牌' } },
+  ]);
+
+  onCardAction({
+    operator: { open_id: 'ou_me' },
+    action: { value: { act: 'full-screen', lines: 200 } },
+    context: { open_chat_id: 'oc_1' },
+  });
+  assert.deepStrictEqual(calls.manager.at(-1), [
+    'onCardAction',
+    { chatId: 'oc_1', openId: 'ou_me', action: { act: 'full-screen', lines: 200 } },
+  ]);
+});
+
+test('机器人被拉进群：交给总控面板做自我介绍', async () => {
+  const { deps, calls } = makeDeps();
+  await createDaemon({ deps });
+
+  calls.wsOpts.handlers.onBotAdded({
+    chat_id: 'oc_g',
+    operator_id: { open_id: 'ou_me' },
+  });
+  assert.deepStrictEqual(calls.control.at(-1), [
+    'onBotAdded',
+    { chatId: 'oc_g', openId: 'ou_me' },
+  ]);
 });
 
 test('IPC 客户端消息：list / ping / input / resize / create / close / 未知', async () => {
