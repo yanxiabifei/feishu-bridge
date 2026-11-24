@@ -10,12 +10,21 @@ function parseContent(raw) {
 
 function postToText(post) {
   const blocks = Array.isArray(post && post.content) ? post.content : [];
+  const rawCode = [];
   const lines = blocks.map((line) => (Array.isArray(line) ? line : []).map((el) => {
     if (!el) return '';
     if (el.tag === 'text') return String(el.text || '');
     if (el.tag === 'a') return String(el.text || '') || String(el.href || '');
     if (el.tag === 'at') return el.user_name ? `@${el.user_name}` : '';
-    if (el.tag === 'code_block' || el.tag === 'md') {
+    if (el.tag === 'code_block') {
+      // 代码块保留原文：用占位符绕过 stripMentions 的 @ 剥离与空白压缩
+      const parts = Array.isArray(el.text) ? el.text : [el.text];
+      const code = parts.map((p) => String((p && typeof p === 'object' ? p.text : p) || '')).join('');
+      if (!code) return '';
+      rawCode.push(code);
+      return `${rawCode.length - 1}`;
+    }
+    if (el.tag === 'md') {
       const parts = Array.isArray(el.text) ? el.text : [el.text];
       return parts.map((p) => String((p && typeof p === 'object' ? p.text : p) || '')).join('');
     }
@@ -25,8 +34,8 @@ function postToText(post) {
   }).join(''));
   const body = lines.filter((l) => l !== '').join('\n');
   const title = post && post.title ? String(post.title) : '';
-  if (!title) return body;
-  return body ? `${title}\n${body}` : title;
+  const text = title ? (body ? `${title}\n${body}` : title) : body;
+  return { text, rawCode };
 }
 
 function stripMentions(text, mentions) {
@@ -65,7 +74,9 @@ function parseMessage(evt) {
     return base;
   }
   if (type === 'post') {
-    base.text = stripMentions(postToText(content), mentions);
+    const { text, rawCode } = postToText(content);
+    base.text = stripMentions(text, mentions)
+      .replace(/\uE000(\d+)\uE001/g, (token, i) => (rawCode[i] === undefined ? token : rawCode[i]));
     return base;
   }
   if (type === 'image' && content.image_key) {

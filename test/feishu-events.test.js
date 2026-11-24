@@ -133,6 +133,48 @@ test('post 富文本保留 code_block 与 md 文本', () => {
   assert.strictEqual(m.text, '看代码\nconst x = 1;\n\nreturn x;\nmd **一** md 二');
 });
 
+test('post 代码块保留 4 空格缩进与连续 3 个换行', () => {
+  const code = '    const x = 1;\n\n\n    return x;';
+  const content = JSON.stringify({
+    content: [
+      [{ tag: 'text', text: '看代码' }],
+      [{ tag: 'code_block', language: 'js', text: code }],
+      [{ tag: 'text', text: '结束' }],
+    ],
+  });
+  const m = parseMessage(evt({}, { message_type: 'post', content }));
+  assert.strictEqual(m.text, `看代码\n${code}\n结束`);
+});
+
+test('post 代码块里的 @_user_1 原样保留', () => {
+  const code = '// @_user_1 注释\nconst y = 2;';
+  const content = JSON.stringify({
+    content: [[{ tag: 'code_block', language: 'js', text: code }]],
+  });
+  const m = parseMessage(evt({}, {
+    message_type: 'post',
+    content,
+    mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: '桥' }],
+  }));
+  assert.strictEqual(m.text, code);
+  assert.strictEqual(m.mentioned, true);
+});
+
+test('post 代码块外的 @_user_1 仍被正常剥离', () => {
+  const content = JSON.stringify({
+    content: [
+      [{ tag: 'text', text: '@_user_1 看这段' }],
+      [{ tag: 'code_block', text: 'const z = 3;' }],
+    ],
+  });
+  const m = parseMessage(evt({}, {
+    message_type: 'post',
+    content,
+    mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: '桥' }],
+  }));
+  assert.strictEqual(m.text, '看这段\nconst z = 3;');
+});
+
 test('post 图片与分割线有占位文本', () => {
   const content = JSON.stringify({
     content: [[{ tag: 'img', image_key: 'img_1' }], [{ tag: 'hr' }]],
