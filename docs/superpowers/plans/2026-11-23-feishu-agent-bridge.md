@@ -8437,6 +8437,8 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 35. **任务 17 复审后的已知非阻塞项（不在本任务修，留给最终整体审查评估）。** ①`finalizePendingCard` 的 `updateCardEntity` 失败只记日志，不像主路径那样 `sendCard` 兜底重发——卡片会停在「处理中」且该段文字丢失；概率低（只发生在空白/无输出回合），修法是对齐主路径。②三个测试缺口：pendingCard 先登记后发送、发送失败 catch 清空 pending、drain 的 settle 语义，变异实验显示删掉这三点仍 44/44 绿，靠阅读而非测试守护。③`src/agent/tools.js` 顶部注释仍写「碰到 user 就停」，与新逻辑矛盾，属注释过期。④PTY 在无 Stop 的情况下退出（`exit` 到 `error`）时 `pendingCard` 残留，卡片会停在「处理中」；这是任务 17 之前就有的问题，可在任务 18 的 exit 分支顺手收尾。⑤重复 Stop（重连/重放）会重复发回复卡并多加一次 `turnSeq`，无幂等。⑥超过 20MB 的 transcript 静默跳过工具摘要，9 份真实文件中有 2 份命中。
 
+36. **任务 18 复审后的已知非阻塞项。** ①质量审查发现并已在本任务修复：`ptySession.kill()` 曾把共享的 `session.status` 置 `'closed'`，覆盖 `closeSession` 先置的 `'closing'`，导致主动关闭仍发「进程异常退出」卡并广播一次 error 状态；已删该行，并补「主动关闭不误报崩溃」测试（假 PTY 的 kill 同步 emit exit）。注意该 manager 级测试模拟的是修复后行为，若有人把该行加回 `ptySession.kill()`，这个测试不会拦（靠 ptySession 自身测试与代码评审守护）。②`revive()` 的 `spawn(record)` 与两处网络调用没有 try/catch，与 `createFromPhone`/`createFromPc` 的「启动失败」处理不一致；PTY 拉不起来时记录停在 `starting` 且用户收不到提示。③`closeSession` 的 `store.remove` 在 `notify`/`autoDisband` 两个 await 之后，若期间用户发「重来」复活同一记录，会被随后的 remove 删掉，留下孤儿 PTY；当前调用方（解散/移出/抽检）都不触发，接窗口关闭时要修。④第 35 条④（exit 时 `pendingCard` 残留）仍未处理。⑤`onCardAction` 的 `force-send` 对过期按钮会把字面「仍然发送」当普通消息提交（既有 `onPhoneMessage` 魔法串重载的延伸）。⑥`tick()` 串行 await 每群一次 `getChat`，会话多时单轮可能超过 30 秒与下一轮重叠（`store.all()` 快照语义安全，属性能项）。
+
 ---
 
 ## 8. 计划完成状态
