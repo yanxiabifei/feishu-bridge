@@ -137,3 +137,62 @@ test('truncate：非字符串输入不抛错', () => {
   assert.strictEqual(cards.truncate(null).text, '');
   assert.strictEqual(cards.truncate(123).text, '123');
 });
+
+test('screenOutputCard：引导行 + 代码块 + 查看完整画面按钮', () => {
+  const c = cards.screenOutputCard({
+    lead: '🖥 你刚在电脑上问：写个快排',
+    text: 'def quicksort():\n    pass',
+    agent: 'codex',
+    cwd: 'D:/x',
+  });
+  const body = JSON.stringify(c.body);
+  assert.ok(body.includes('你刚在电脑上问'));
+  assert.ok(body.includes('def quicksort'));
+  const btn = c.body.elements.find((e) => e.tag === 'button');
+  assert.deepStrictEqual(btn.behaviors[0].value, { act: 'full-screen', lines: 200 });
+});
+
+test('screenOutputCard：超长画面截断', () => {
+  const c = cards.screenOutputCard({ text: 'x'.repeat(9000) });
+  assert.ok(JSON.stringify(c.body).includes('已截断'));
+});
+
+test('fullScreenCard：标题带行数，正文带画面', () => {
+  const c = cards.fullScreenCard({ text: '第 1 行\n第 200 行', lines: 200 });
+  assert.ok(c.header.title.content.includes('200'));
+  assert.ok(JSON.stringify(c.body).includes('第 200 行'));
+});
+
+test('screenOutputCard：围栏内容里的 ``` 被打断且 <at> 被转义', () => {
+  const c = cards.screenOutputCard({ text: '正常\n```\n<at id=all></at>\n```\n尾' });
+  const json = JSON.stringify(c.body);
+  assert.ok(!json.includes('<at '), '不得出现未转义的 <at');
+  assert.ok(json.includes('&#60;at'), '应转义为 &#60;at');
+  const el = c.body.elements.find((e) => e.tag === 'markdown' && e.content.startsWith('```'));
+  assert.ok(el);
+  const lines = el.content.split('\n');
+  assert.strictEqual(lines.filter((l) => l === '```').length, 2);
+  assert.ok(el.content.includes(String.fromCharCode(0x200b)), '应有零宽空格打断围栏');
+});
+
+test('screenOutputCard：lead 里的 <at> 被转义', () => {
+  const c = cards.screenOutputCard({
+    lead: '🖥 你刚在电脑上问：<at id=all></at>',
+    text: '画面',
+  });
+  const json = JSON.stringify(c.body);
+  assert.ok(!json.includes('<at '), '不得出现未转义的 <at');
+  assert.ok(json.includes('&#60;at'), '应转义为 &#60;at');
+});
+
+test('fullScreenCard：围栏内容里的 ``` 被打断且 <at> 被转义', () => {
+  const c = cards.fullScreenCard({ text: 'a\n```\n<at id=all></at>\n```\nb', lines: 200 });
+  const json = JSON.stringify(c.body);
+  assert.ok(!json.includes('<at '), '不得出现未转义的 <at');
+  assert.ok(json.includes('&#60;at'), '应转义为 &#60;at');
+  const el = c.body.elements.find((e) => e.tag === 'markdown' && e.content.startsWith('```'));
+  assert.ok(el);
+  const lines = el.content.split('\n');
+  assert.strictEqual(lines.filter((l) => l === '```').length, 2);
+  assert.ok(el.content.includes(String.fromCharCode(0x200b)), '应有零宽空格打断围栏');
+});
