@@ -8445,6 +8445,8 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 39. **任务 22 复审后的转义加固（必须修的注入缺陷）。** 质量审查发现新增的「画面推送卡」`screenOutputCard` 与「完整画面」`fullScreenCard` 直接用 `md('```\n' + truncate(text) + '\n```')` 拼代码块：终端输出里只要出现三个反引号就会提前闭合围栏，后续内容（例如 Codex 输出里的 `<at id=all></at>`）会被当作真卡片语法解析，等于把 @所有人 的按钮交给终端输出。`lead`（电脑端输入回显）同理未转义。已改为与既有 `screenCard` 一致的三层写法：`neutralizeFences(escapeText(truncate(...)))`（围栏内插 U+200B 打断、`<` → `&#60;`），`lead` 走 `md(escapeText(lead))`。另修两处：完整画面的 `lines` 参数用 `Math.floor` 取整（`'40.5'` 会令 `buf.getLine(40.5)` 取不到行），`pushScreenOutput` 的状态守卫补齐 `'interrupted'` 与完整画面分支一致——该守卫因有更早的分支拦截，属不可达状态，测试无法覆盖，靠阅读守护。新增 4 条真红用例（围栏闭合 ×3、`'40.5'`）+ 3 条回归守卫；cards 20、manager 64、全量 297。
 
+40. **任务 25 复审后的修正与已知非阻塞项（合并 `82f2ac8`，全量 313）。** ①规格审查发现「装配」用例的两条穿透断言是空转：`screenFactory: () => ({fallback:true})` 丢掉了实参，`queueFactory` 压根没断言；已改为在 `calls` 里记录 `screenArgs`/`queueArgs` 并断言 `{cols:120,rows:30}`、`wrapped.queueFactory === deps.queueFactory`、`calls.queueArgs` 为 `{limit:7}`，用例数不变（改后用 `--amend` 落成 `5c11a60`）。②质量审查列出但按计划范围暂不处理的项：async catch 回调里直接 `log.warn`，若日志 appendFileSync 抛错（磁盘满/权限）会成为未捕获拒绝并把 daemon 打死，建议移植 `src/ipc.js` 的 `reportHandlerError`/`safeWarn` 写法；`stop()` 的 `manager.shutdown()` 与 `ipc.close()` 之间无 `try/finally`，前者抛错则 IPC 永不关闭；停机中第二次 Ctrl+C 被一次性 handler 吞掉且无提示；`started` 在 await 之前就置真，start 失败后无法重试；stop 之后再 start 静默无操作；`probeRunning` 只看 `/health` 不校验是不是本项目的 daemon；端口/超时等数字参数未做范围校验。③覆盖缺口：sweep 定时器分支、未就绪时的 `!manager` 守卫、`probeRunning` 的失败路径、IPC `attach` 分支、`onHookStop` 接线、信号只处理一次，均无断言。
+
 ---
 
 ## 8. 计划完成状态
