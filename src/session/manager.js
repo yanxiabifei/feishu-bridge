@@ -46,6 +46,15 @@ function createManager({
       .catch((err) => log.warn('异步任务失败', { message: String((err && err.message) || err) }));
     return pendingWork;
   }
+
+  // 等到队列真正稳定：任务执行过程中可能又追加新任务，不能只 await 一次快照
+  async function drainWork() {
+    let prev;
+    do {
+      prev = pendingWork;
+      await prev.catch(() => {});
+    } while (prev !== pendingWork);
+  }
   const loadProjectsFn = getProjects
     || (() => loadProjects({ file: paths.PROJECTS, defaultCwd: config.defaultCwd }));
 
@@ -82,7 +91,13 @@ function createManager({
       }
       if (ipc && ipc.broadcast) ipc.broadcast({ type: 'session', session: record });
     }
-    if (e.type === 'turn-start') enqueueWork(() => startProcessingCard(record, e));
+    if (e.type === 'turn-start') {
+      record.turnSeq = (record.turnSeq || 0) + 1;
+      // 这里必须当场捕获轮次号：若在闭包里再读 record.turnSeq，Stop 先到并自增后
+      // 迟到的建卡任务会误以为自己是当前轮，发出永远定不了稿的过期卡。
+      const turn = record.turnSeq;
+      enqueueWork(() => startProcessingCard(record, e, turn));
+    }
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
     if (e.type === 'overflow') log.warn('队列已满', { sessionId: e.sessionId });
   }
@@ -215,14 +230,17 @@ function createManager({
     return record;
   }
 
-  async function startProcessingCard(record, e) {
+  async function startProcessingCard(record, e, turn) {
     if (record.agent !== 'claude') return;      // Codex 不做卡片定稿，走画面推送（任务 20）
     try {
       const cardId = await api.createCardEntity(cards.processingCard({ agent: record.agent, prompt: e.text }));
-      await api.sendCardEntity(record.chatId, cardId);
+      // 建卡期间本轮已结束（Stop 先到）：不要再发一张没人收尾的过期卡
+      if (record.turnSeq !== turn) return;
       record.pendingCard = { cardId, seq: 0, origin: e.origin, prompt: e.text };
-      store.save();
+      await api.sendCardEntity(record.chatId, cardId);
     } catch (err) {
+      // 卡没发出去，别留着让 Stop 去更新一张不存在的卡
+      record.pendingCard = null;
       log.warn('处理中卡片发送失败，Stop 时改为新发一张', { message: String((err && err.message) || err) });
     }
   }
@@ -231,9 +249,14 @@ function createManager({
     if (!record.transcriptPath) return '';
     try {
       const st = fsApi.statSync(record.transcriptPath);
+      // 超大 transcript 有意静默跳过：每轮都打日志会刷屏
       if (!st || st.size > TOOL_SUMMARY_MAX_BYTES) return '';
       return summarizeToolUse(fsApi.readFileSync(record.transcriptPath, 'utf8'));
-    } catch {
+    } catch (err) {
+      log.warn('读取 transcript 失败', {
+        path: record.transcriptPath,
+        message: String((err && err.message) || err),
+      });
       return '';
     }
   }
@@ -253,6 +276,23 @@ function createManager({
     return store.all().find((s) => s.claudeSessionId === claudeSessionId) || null;
   }
 
+  // 提前结束本轮（只回车、无输出）时也要把「处理中」卡片就地定稿，不能留一张永远转圈的卡
+  async function finalizePendingCard(record, text) {
+    const pending = record.pendingCard;
+    if (!pending || !pending.cardId) return;
+    record.pendingCard = null;
+    try {
+      const card = cards.replyCard({ text, agent: record.agent, cwd: record.cwd });
+      await api.updateCardEntity(pending.cardId, card, pending.seq + 1);
+    } catch (err) {
+      log.warn('处理中卡片收尾失败', {
+        cardId: pending.cardId, chatId: record.chatId, message: String((err && err.message) || err),
+      });
+    }
+    // 收尾前的 save 仍带着 pendingCard，这里补一次把已清空的状态落盘
+    store.save();
+  }
+
   async function onHookStop({ sessionId, payload = {} }) {
     const record = store.get(sessionId) || findByClaudeSessionId(payload.session_id);
     if (!record) {
@@ -260,6 +300,8 @@ function createManager({
       return;
     }
 
+    // 本轮结束：自增轮次号，让仍在飞行中的建卡任务失效
+    record.turnSeq = (record.turnSeq || 0) + 1;
     // 回填 Claude 自己的会话信息：重启后 --resume 靠它（任务 19）
     if (payload.session_id) record.claudeSessionId = payload.session_id;
     if (payload.transcript_path) record.transcriptPath = payload.transcript_path;
@@ -272,11 +314,17 @@ function createManager({
     ipc?.broadcast({ type: 'session', session: record });
 
     const input = record.lastInput;
-    if (input && !String(input.text || '').trim()) return;   // 只按了回车，不推
+    if (input && !String(input.text || '').trim()) {   // 只按了回车，不推
+      await finalizePendingCard(record, '本轮只按了回车，没有别的输入。');
+      return;
+    }
 
     const reply = String(payload.last_assistant_message || '').trim();
     const interrupted = sawInterrupted(record);
-    if (!reply && !interrupted) return;
+    if (!reply && !interrupted) {
+      await finalizePendingCard(record, '本轮没有文字输出。');
+      return;
+    }
 
     const parts = [];
     if (input && input.origin === 'pc' && input.text) parts.push(`🖥 你刚在电脑上问：${input.text}`);
@@ -294,7 +342,11 @@ function createManager({
         store.save();
         return;
       } catch (err) {
-        log.warn('卡片定稿失败，改为新发一张', { message: String((err && err.message) || err) });
+        log.warn('卡片定稿失败，改为新发一张', {
+          cardId: pending.cardId,
+          chatId: record.chatId,
+          message: String((err && err.message) || err),
+        });
       }
     }
     await api.sendCard(record.chatId, card);
@@ -380,7 +432,7 @@ function createManager({
     createFromPc,
     onPhoneMessage,
     onHookStop,
-    _drain: () => pendingWork,
+    _drain: drainWork,
     _sessions: sessions,
   };
 }

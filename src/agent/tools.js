@@ -19,7 +19,16 @@ function summarizeToolUse(jsonlText) {
       continue;
     }
     if (!entry || typeof entry !== 'object') continue;
-    if (entry.type === 'user') break;
+    if (entry.type === 'user') {
+      // Claude Code 每次工具调用后都会写一条 tool_result-only 的 user 条目；
+      // 它不是用户输入，不能当作本轮边界。真实用户提示（字符串 content、
+      // 含 text 块的数组，包括 isMeta 技能注入）才算边界。
+      const c = entry.message && entry.message.content;
+      const onlyResults = Array.isArray(c) && c.length > 0
+        && c.every((b) => b && b.type === 'tool_result');
+      if (onlyResults) continue;
+      break;
+    }
     if (entry.type !== 'assistant') continue;
 
     const content = entry.message && entry.message.content;

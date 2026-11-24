@@ -61,7 +61,14 @@ function setup({
       },
       onPcKeys() {},
       needsConfirm() { return ps.confirm; },
-      get screen() { return { snapshot: () => ps.screenText || '屏幕内容' }; },
+      get screen() {
+        return {
+          snapshot(opts) {
+            ps.snapshotOpts = opts;
+            return ps.screenText || '屏幕内容';
+          },
+        };
+      },
       releaseTurn() {},
       kill() {},
       emit(e) { o.onEvent({ sessionId: o.session.id, ...e }); },
@@ -452,6 +459,7 @@ test('Stop：画面停在 Interrupted 且没有正文 → 推「（已打断）�
 
   const body = JSON.stringify(calls.filter((c) => c[0] === 'sendCard').at(-1)[2].body);
   assert.ok(body.includes('（已打断）'));
+  assert.deepStrictEqual(spawned[0].snapshotOpts, { lines: 12 });
 });
 
 test('turn-start 建处理中卡片，Stop 原地定稿', async () => {
@@ -503,4 +511,79 @@ test('Stop：找不到任何会话时静默返回', async () => {
   const { manager, calls } = setup();
   await manager.onHookStop({ sessionId: 's_none', payload: { last_assistant_message: '幽灵' } });
   assert.strictEqual(calls.length, 0);
+});
+
+test('Stop：最后输入为空时收尾处理中卡片并落盘', async () => {
+  const { manager, store, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 2, origin: 'phone', text: '一' });
+  await manager._drain();
+  assert.ok(rec.pendingCard && rec.pendingCard.cardId === 'card_1');
+
+  const savesBefore = store.saveCalls;
+  spawned[0].emit({ type: 'input', input: { seq: 2, origin: 'phone', text: '   ', at: 2 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '好的' } });
+
+  assert.strictEqual(rec.pendingCard, null);
+  const ups = calls.filter((c) => c[0] === 'updateCardEntity');
+  assert.strictEqual(ups.length, 1);
+  assert.strictEqual(ups[0][1], 'card_1');
+  assert.ok(JSON.stringify(ups[0][3].body).includes('本轮只按了回车'));
+  assert.ok(store.saveCalls > savesBefore);
+});
+
+test('Stop：无回复且未打断时收尾处理中卡片', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 2, origin: 'phone', text: '一' });
+  await manager._drain();
+  assert.ok(rec.pendingCard && rec.pendingCard.cardId === 'card_1');
+  assert.ok(!spawned[0].snapshotOpts, '此时还没查过画面');
+
+  spawned[0].emit({ type: 'input', input: { seq: 2, origin: 'phone', text: '一', at: 2 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '' } });
+
+  assert.strictEqual(rec.pendingCard, null);
+  const upd = calls.find((c) => c[0] === 'updateCardEntity');
+  assert.ok(upd);
+  assert.strictEqual(upd[1], 'card_1');
+  assert.ok(JSON.stringify(upd[3].body).includes('本轮没有文字输出'));
+});
+
+test('Stop 先到：慢建卡不会发出过期卡', async () => {
+  const created = [];
+  const { manager, calls, spawned, rec } = await started({
+    apiOverrides: {
+      createCardEntity: async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        created.push('card_slow');
+        return 'card_slow';
+      },
+    },
+  });
+
+  spawned[0].emit({ type: 'turn-start', seq: 2, origin: 'phone', text: '慢' });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '先结束' } });
+  await manager._drain();
+
+  assert.deepStrictEqual(created, ['card_slow']);
+  assert.ok(!calls.some((c) => c[0] === 'sendCardEntity' && c[2] === 'card_slow'));
+  assert.strictEqual(rec.pendingCard, null);
+});
+
+test('enqueueWork：建卡失败后队列仍能继续处理下一次 turn-start', async () => {
+  let createCalls = 0;
+  const { manager, spawned, rec } = await started({
+    apiOverrides: {
+      createCardEntity: async () => {
+        createCalls += 1;
+        throw new Error('建卡失败');
+      },
+    },
+  });
+
+  spawned[0].emit({ type: 'turn-start', seq: 2, origin: 'phone', text: '一' });
+  spawned[0].emit({ type: 'turn-start', seq: 3, origin: 'phone', text: '二' });
+  await manager._drain();
+
+  assert.strictEqual(createCalls, 2);
+  assert.ok(!rec.pendingCard);
 });
