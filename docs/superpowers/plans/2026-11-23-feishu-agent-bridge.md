@@ -8453,9 +8453,205 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 ---
 
+### 任务 29：修复 ConPTY conout Worker 句柄泄漏（生产侧）
+
+**背景（任务 26 实测结论，见 §7 第 42 条②）：** node-pty 1.1.0 在子进程**自然退出**后不会释放 ConPTY 的 `conout` Worker：`WindowsPtyAgent.kill()` 开头有 `hasExited` 守卫，`disposed`/`wasDisposed` 为真时直接返回，`_conoutSocketWorker.dispose()` 永远不执行。泄漏的是 Worker 的 `MessagePort`，它会一直把 Node 的事件循环撑住。任务 26 在 e2e 里用「测试结束时对原始 pty 再调一次 `kill()`」绕过去了，但**生产代码同样泄漏**：daemon 每关一个会话就漏一个 Worker，且 daemon 自身在 `manager.shutdown()` 后无法干净退出。本任务修生产侧，并补一个子进程级回归测试（单测的假 pty 看不到句柄）。
+
+**文件：**
+- 修改：`src/session/ptySession.js`（`onExit`）
+- 修改：`test/ptySession.test.js`（harness 记录 kill 次数 + 新增用例）
+- 创建：`test/fixtures/pty-leak-child.js`
+- 创建：`test/pty-leak.test.js`
+- 修改：`test/e2e.test.js`（只更新已过期的注释，`killRaw` 保留作双保险）
+
+---
+
+- [ ] **步骤 1：让 harness 记录 kill 次数，并写失败的单测**
+
+`test/ptySession.test.js` 的 `harness()` 里：
+
+```js
+  let killCalls = 0;
+  const pty = {
+    pid: 4242,
+    onData(fn) { dataHandler = fn; },
+    onExit(fn) { exitHandler = fn; },
+    write(s) { written.push(s); },
+    resize(c, r) { resized.push([c, r]); },
+    kill() { killCalls++; exitHandler({ exitCode: 0 }); },
+  };
+```
+
+返回对象里加 `get killCalls() { return killCalls; },`。新增用例：
+
+```js
+test('agent 自然退出后对原始 pty 调一次 kill（释放 conout Worker）', () => {
+  const h = harness();
+  h.ps.start();
+  h.ps._pollReady();
+  assert.strictEqual(h.ps.status, 'idle');
+  h.emitExit(0);
+  assert.strictEqual(h.ps.status, 'closed');
+  assert.strictEqual(h.killCalls, 1, '自然退出后必须补一次 pty.kill()，否则 conout Worker 泄漏');
+  assert.strictEqual(h.events.filter((e) => e.type === 'exit').length, 1, 'exit 事件不能重复');
+});
+```
+
+注意假 pty 的 `kill()` 会**同步**回调 `exitHandler`，所以生产代码必须能扛住 `onExit` 重入：再次进入时不能再 drain、不能再 emit exit。
+
+- [ ] **步骤 2：运行确认失败**
+
+运行：`node --test test/ptySession.test.js`
+预期：新用例 FAIL，`killCalls` 为 0（实际得到 `0`）。
+
+- [ ] **步骤 3：实现修复**
+
+`src/session/ptySession.js` 的 `onExit` 改为：
+
+```js
+  function onExit(info) {
+    clearReadyTimer();
+    status = 'closed';
+    session.status = 'closed';
+    disposed = true;
+    queue.drain();
+    // node-pty 在子进程自然退出后不会自己 dispose：WindowsPtyAgent.kill() 被
+    // hasExited 守卫短路，conout Worker 的 MessagePort 不释放，事件循环被撑住。
+    // 对原始 pty 再调一次 kill 才会走 dispose 路径；先把 pty 摘掉防止重入。
+    if (pty) {
+      const p = pty;
+      pty = null;
+      try { p.kill(); } catch { /* 已经退出 */ }
+    }
+    disposeScreen();
+    emitExitOnce(info && info.exitCode, info && info.signal);
+  }
+```
+
+- [ ] **步骤 4：运行确认通过**
+
+运行：`node --test test/ptySession.test.js`
+预期：全部 PASS（含新用例）。
+
+- [ ] **步骤 5：写子进程级回归测试（真句柄）**
+
+`test/fixtures/pty-leak-child.js`（注意：不要命名为 `*.test.js`，否则被 glob 收进测试轮）：
+
+```js
+// 子进程：开一个真实 ConPTY 会话，让 fake-agent 执行 /exit 自己退出。
+// 修复前 conout Worker 的 MessagePort 不释放，本进程跑完也不会退出；
+// 修复后 onExit 补的 pty.kill() 会 dispose Worker，事件循环自然空掉。
+const path = require('node:path');
+const pty = require('node-pty');
+const { createPtySession } = require('../../src/session/ptySession');
+const { createScreen } = require('../../src/screen');
+const { createQueue } = require('../../src/session/queue');
+
+const session = {
+  id: 'leak', chatId: 'oc_leak', agent: 'fake', cwd: process.cwd(),
+  status: 'idle', inputSeq: 0, lastInput: null,
+};
+
+const ps = createPtySession({
+  session,
+  launch: () => ({
+    file: process.execPath,
+    args: [path.join(__dirname, 'fake-agent.js')],
+    cwd: process.cwd(),
+  }),
+  ptyFactory: pty.spawn,
+  screenFactory: createScreen,
+  queueFactory: createQueue,
+  onEvent(e) {
+    if (e.type === 'ready') ps.submitText('/exit', 'phone');
+    if (e.type === 'exit') process.stdout.write('CHILD_CLOSED\n');
+  },
+});
+
+ps.start();
+// 不调 process.exit()：句柄都清干净的话，事件循环会自己结束。
+```
+
+`test/pty-leak.test.js`：
+
+```js
+const test = require('node:test');
+const assert = require('node:assert');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+const FIXTURE = path.join(__dirname, 'fixtures', 'pty-leak-child.js');
+const TIMEOUT_MS = 20000;
+
+test('真实 ConPTY 自然退出后子进程能自行结束（conout Worker 已释放）', async () => {
+  const child = spawn(process.execPath, [FIXTURE], { cwd: process.cwd() });
+  const result = await new Promise((resolve) => {
+    let out = '';
+    let err = '';
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, TIMEOUT_MS);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal, out, err, timedOut });
+    });
+  });
+  assert.strictEqual(result.timedOut, false,
+    `子进程 ${TIMEOUT_MS}ms 内没有退出，说明句柄仍在泄漏；stderr=${result.err}`);
+  assert.strictEqual(result.code, 0, `子进程退出码 ${result.code}；stderr=${result.err}`);
+  assert.ok(result.out.includes('CHILD_CLOSED'), `没看到 CHILD_CLOSED；stdout=${result.out}`);
+});
+```
+
+- [ ] **步骤 6：验证测试确实能抓住泄漏**
+
+先临时把步骤 3 的 `if (pty) { … }` 整块注释掉，运行：
+
+运行：`node --test test/pty-leak.test.js`
+预期：FAIL，20 秒超时（不是挂死，父进程会 `child.kill()` 收尾）。
+
+恢复步骤 3 的代码，再运行：
+运行：`node --test test/pty-leak.test.js`
+预期：PASS，约 1–3 秒。
+
+- [ ] **步骤 7：更新 e2e 里过期的注释**
+
+`test/e2e.test.js` 的 `makeSession` 注释现在说「`ps.kill()` 在 hasExited 后被 disposed 守卫短路，不会释放 conout worker 线程」——任务 29 修完后这句话不再成立，改成：
+
+```js
+  // 任务 29 起 onExit 会自己 pty.kill()；这里保留 raw.kill() 作双保险，
+  // 防止将来有人回退修复时整个测试轮挂死。
+```
+
+`killRaw` 逻辑不动。
+
+- [ ] **步骤 8：全量验证**
+
+```bash
+node --test test/ptySession.test.js
+node --test test/pty-leak.test.js
+npm test
+npm run test:e2e
+git status --short
+```
+
+预期：两个单文件全绿；`npm test` 在任务 27 合并后的基数上 +2（任务 27 若先合并约为 345）；e2e 2/2；工作区干净（临时文件都在系统 temp，无仓库残留）。
+
+- [ ] **步骤 9：Commit**
+
+```bash
+git add src/session/ptySession.js test/ptySession.test.js test/fixtures/pty-leak-child.js test/pty-leak.test.js test/e2e.test.js
+git commit -m "fix: 自然退出后释放 ConPTY conout Worker，补子进程级回归测试"
+```
+
+**边界：** 不改 `kill()`、`start()`、队列或屏幕逻辑；不引入 `--test-force-exit`；不动 `package.json`。Windows 之外的平台不在本项目范围内。
+
+---
+
 ## 8. 计划完成状态
 
-- 任务数：28
+- 任务数：29
 - 覆盖规格章节：§1–§13 全部（详见 §5 对照表）
 - 未覆盖、明确留给 Plan B：Electron 多窗口、xterm.js 渲染、项目选择面板、recent 目录扫描、验收第 4、5 条
 - 凭据：本计划所有任务都不需要真实 App ID / Secret / 手机，全部用假件测试；真实凭据只在跑 `npm run setup` 和真机验收时用到
