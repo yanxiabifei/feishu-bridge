@@ -1,6 +1,9 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const paths = require('./paths');
 const { createApi: defaultCreateApi } = require('./feishu/api');
 const { createFeishuWs: defaultCreateWs } = require('./feishu/ws');
-const { loadConfig, saveConfig } = require('./config');
+const { loadConfig, saveConfig, DEFAULTS } = require('./config');
 const { noticeCard } = require('./feishu/cards');
 
 const APP_ID_RE = /^cli_[0-9a-fA-F]{16}$/;
@@ -39,6 +42,7 @@ function createSetup({
   saveConfigFn = saveConfig,
   secretStore,
   configPath,
+  projectsPath = paths.PROJECTS,
   log = console,
   timeoutMs = 120000,
   print = () => {},
@@ -172,6 +176,25 @@ function createSetup({
       ownerChatId: chatId,
     });
     record('写入配置', true, `${configPath}（Secret 已单独加密保存）`);
+
+    try {
+      if (!fs.existsSync(projectsPath)) {
+        const config = loadConfigFn(configPath);
+        const defaultCwd = (config && config.defaultCwd) || DEFAULTS.defaultCwd;
+        fs.mkdirSync(defaultCwd, { recursive: true });
+        const projects = {
+          aliases: { 草稿: defaultCwd, 临时草稿: defaultCwd },
+          default: defaultCwd,
+        };
+        fs.mkdirSync(path.dirname(projectsPath), { recursive: true });
+        const tmp = `${projectsPath}.tmp`;
+        fs.writeFileSync(tmp, `${JSON.stringify(projects, null, 2)}\n`);
+        fs.renameSync(tmp, projectsPath);
+        record('写入项目别名', true, `${projectsPath}（默认别名：草稿、临时草稿）`);
+      }
+    } catch (err) {
+      record('写入项目别名', false, String(err.message || err));
+    }
 
     return { ok: true, steps };
   }

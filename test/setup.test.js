@@ -1,7 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { createSetup } = require('../src/setup');
 const { createApi, FeishuError } = require('../src/feishu/api');
+const { loadConfig, saveConfig } = require('../src/config');
+
+const tempDirs = [];
+
+test.after(() => {
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 const P2P = {
   event_id: 'ev_1',
@@ -49,11 +59,21 @@ function harness({
   timeoutMs = 100,
   createApi: createApiImpl,
   createWs: createWsImpl,
+  projectsPath,
+  configPath,
+  loadConfigFn,
+  saveConfigFn,
+  defaultCwd,
 } = {}) {
   const saved = [];
   const configs = [];
   const lines = [];
   let apiCreated = 0;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-setup-'));
+  tempDirs.push(dir);
+  const projectsFile = projectsPath || path.join(dir, 'projects.json');
+  const configFile = configPath || path.join(dir, 'config.json');
+  const effectiveDefaultCwd = defaultCwd || path.join(dir, 'default-cwd');
   const setup = createSetup({
     prompt: async () => answers.shift(),
     createApi: createApiImpl
@@ -63,14 +83,26 @@ function harness({
       start() { setImmediate(() => { if (evt) handlers.onMessage(evt); }); },
       close() { lines.push('ws closed'); },
     })),
-    loadConfigFn: () => ({ appId: '', queueLimit: 20 }),
-    saveConfigFn: (file, config) => configs.push({ file, config }),
+    loadConfigFn: loadConfigFn
+      || (() => ({ appId: '', queueLimit: 20, defaultCwd: effectiveDefaultCwd })),
+    saveConfigFn: saveConfigFn || ((file, config) => configs.push({ file, config })),
     secretStore: { save: (v) => saved.push(v) },
-    configPath: 'D:/tmp/test-config.json',
+    configPath: configFile,
+    projectsPath: projectsFile,
     timeoutMs,
     print: (line) => lines.push(line),
   });
-  return { setup, saved, configs, lines, apiCreated: () => apiCreated };
+  return {
+    setup,
+    saved,
+    configs,
+    lines,
+    dir,
+    configPath: configFile,
+    defaultCwd: effectiveDefaultCwd,
+    projectsPath: projectsFile,
+    apiCreated: () => apiCreated,
+  };
 }
 
 test('App ID 格式不对：不创建 API、不写配置', async () => {
@@ -79,6 +111,7 @@ test('App ID 格式不对：不创建 API、不写配置', async () => {
   assert.strictEqual(res.ok, false);
   assert.strictEqual(h.apiCreated(), 0);
   assert.strictEqual(h.configs.length, 0);
+  assert.strictEqual(fs.existsSync(h.projectsPath), false);
   assert.match(res.steps[0].detail, /cli_/);
 });
 
@@ -90,6 +123,7 @@ test('getToken 失败：给出「发布版本」提示', async () => {
   const res = await h.setup.run();
   assert.strictEqual(res.ok, false);
   assert.match(res.steps.find((s) => !s.ok).detail, /版本/);
+  assert.strictEqual(fs.existsSync(h.projectsPath), false);
 });
 
 test('App Secret 为空：不创建 API、不写配置', async () => {
@@ -151,6 +185,76 @@ test('全流程成功：建房 → 文本 → 卡片 → 解散 → 写配置', 
   assert.strictEqual(h.configs[0].config.ownerChatId, 'oc_p2p');
   assert.strictEqual(h.configs[0].config.queueLimit, 20); // 原配置保留
   assert.ok(res.steps.every((s) => s.ok));
+});
+
+test('首次 setup 创建 projects.json：默认别名指向 defaultCwd', async () => {
+  const h = harness({ answers: ['cli_0123456789abcdef', 'sec'], api: fakeApi().api });
+  const res = await h.setup.run();
+
+  assert.strictEqual(res.ok, true);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(h.projectsPath, 'utf8')), {
+    aliases: { 草稿: h.defaultCwd, 临时草稿: h.defaultCwd },
+    default: h.defaultCwd,
+  });
+  assert.strictEqual(fs.existsSync(h.defaultCwd), true); // 目录必须先建好，否则建会话会被拒
+  const step = res.steps.find((s) => s.name === '写入项目别名');
+  assert.strictEqual(step.ok, true);
+  assert.match(step.detail, /草稿、临时草稿/);
+});
+
+test('真实 saveConfig/loadConfig：projects.json 采用落盘的 defaultCwd', async () => {
+  const h = harness({
+    answers: ['cli_0123456789abcdef', 'sec'],
+    api: fakeApi().api,
+    loadConfigFn: loadConfig,
+    saveConfigFn: saveConfig,
+  });
+  const realCwd = path.join(h.dir, 'real-default-cwd');
+  saveConfig(h.configPath, { defaultCwd: realCwd });
+
+  const res = await h.setup.run();
+
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(loadConfig(h.configPath).defaultCwd, realCwd);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(h.projectsPath, 'utf8')), {
+    aliases: { 草稿: realCwd, 临时草稿: realCwd },
+    default: realCwd,
+  });
+  assert.strictEqual(fs.existsSync(realCwd), true);
+});
+
+test('defaultCwd 目录建不出来：记录失败且不写 projects.json', async () => {
+  const h = harness({
+    answers: ['cli_0123456789abcdef', 'sec'],
+    api: fakeApi().api,
+    loadConfigFn: loadConfig,
+    saveConfigFn: saveConfig,
+  });
+  const blocker = path.join(h.dir, 'blocker');
+  fs.writeFileSync(blocker, 'not a directory');
+  const badCwd = path.join(blocker, 'child');
+  saveConfig(h.configPath, { defaultCwd: badCwd });
+
+  const res = await h.setup.run();
+
+  assert.strictEqual(res.ok, true);
+  const step = res.steps.find((s) => s.name === '写入项目别名');
+  assert.strictEqual(step.ok, false);
+  assert.strictEqual(fs.existsSync(h.projectsPath), false);
+  assert.strictEqual(fs.existsSync(`${h.projectsPath}.tmp`), false);
+  assert.strictEqual(loadConfig(h.configPath).defaultCwd, badCwd); // 真实 config 已落盘
+});
+
+test('projects.json 已存在：setup 不覆盖用户别名', async () => {
+  const h = harness({ answers: ['cli_0123456789abcdef', 'sec'], api: fakeApi().api });
+  const original = { aliases: { 我的: 'D:/x' }, default: 'D:/x' };
+  fs.writeFileSync(h.projectsPath, JSON.stringify(original));
+
+  const res = await h.setup.run();
+
+  assert.strictEqual(res.ok, true);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(h.projectsPath, 'utf8')), original);
+  assert.strictEqual(res.steps.some((s) => s.name === '写入项目别名'), false);
 });
 
 test('卡片发送失败不阻断，仍写配置', async () => {
