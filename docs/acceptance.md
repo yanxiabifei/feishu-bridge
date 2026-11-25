@@ -93,10 +93,15 @@
 
 ### 9. 🅐 重启电脑 → 自动恢复
 
-1. 先确认任务 27 的计划任务已安装（`schtasks /Query /TN FeishuBridge.Daemon`）。
+1. 装开机自启（只需一次）：`npm run autostart -- install`（前提：已跑过 `npm run setup`、飞书凭据已填；装完 `npm run autostart -- status` 应显示已安装）。
+   - 查状态：`npm run autostart -- status`
+   - 卸载：`npm run autostart -- uninstall`
 2. 重启电脑，登录后等 30 秒。旧群会收到「电脑重启了，回一条消息我就接上。」。
 3. 往旧群发一句话。
-4. 判定：群里先收到「重新开起来了，接着上次的对话。」，随后这句话被执行且能接着之前的上下文；任务管理器里对应 `claude.exe` 的命令行含 `--resume`。
+4. 判定：daemon 在重启后无需手动 `npm start` 自动起来；群里先收到「重新开起来了，接着上次的对话。」，随后这句话被执行且能接着之前的上下文；用 PowerShell 查 daemon 子进程，命令行含 `--resume`：
+   ```powershell
+   Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '--resume' } | Select-Object Name, ProcessId, CommandLine
+   ```
 
 > 前提：该会话在重启前已完成至少一轮 claude 对话（`state/sessions.json` 中该会话有 `claudeSessionId`）；否则恢复提示是「重新开起来了。」，命令行不带 `--resume`，本项按前半段判定。
 
