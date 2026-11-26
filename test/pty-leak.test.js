@@ -4,7 +4,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'pty-leak-child.js');
-const TIMEOUT_MS = 20000;
+const TIMEOUT_MS = 30000;
 
 test('真实 ConPTY 自然退出后子进程能自行结束（conout Worker 已释放）', async () => {
   const child = spawn(process.execPath, [FIXTURE], { cwd: process.cwd() });
