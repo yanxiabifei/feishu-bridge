@@ -8455,6 +8455,9 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 44. **任务 29 的落地与审查记录（合并 `53f69d0`，全量 368）。** ①根因核实（审查者用 grep 推翻了初版注释）：node-pty 1.1.0 全库无 `hasExited`；自然退出时 `windowsTerminal.js:97-100` 的 socket close 只 `emit('exit')` + `_close()`，从不调 `_agent.kill()`，而 `_conoutSocketWorker.dispose()` 只在 `WindowsPtyAgent.kill()` 内（`windowsPtyAgent.js:151`/158），于是 MessagePort 撑住事件循环。修法是在 `onExit` 里先 `const p = pty; pty = null;` 再 `p.kill()`。②重入：假 pty 的 `kill()` 会同步回调 `exitHandler`，此时 `pty` 已为 null，不会再递归；`queue.drain()` 对空数组幂等，`disposeScreen`/`emitExitOnce` 各有守卫，exit 事件恒 1 次。③回归测试两层：单测断言 `killCalls === 1`（变异后为 0 并转红）；`test/pty-leak.test.js` 用真实 ConPTY 子进程且不调 `process.exit()`，只能靠事件循环自然排空退出，变异后超时转红、修复后约 7 s 通过。④实测 ~7 s 而非计划预期的 1–3 s：其中约 5 s 是 node-pty `windowsPtyAgent.js:189-193` 未 unref 的 `setTimeout` 在等 `AttachConsole`（进程已退出会打 `AttachConsole failed`），与泄漏无关；超时因此从 20 s 放宽到 30 s。⑤已知副作用（审查者探针实测，本任务按边界未改）：手动 `kill()` 后真实 exit 仍会再进一次 `onExit`，导致 `killCalls === 2`；`dispose()` 幂等不会双重泄漏，但真实 node-pty 下会多 fork 一次 `conpty_console_list_agent` 并再排一个 5 s 定时器。后续若要消除，把 `kill()` 也改成先摘 `pty`。⑥`pty = null` 后 `writeItem` 无守卫，但 `submitText` 已按 `disposed/closed` 拦截、队列已 drain，现有路径不可达。测试：ptySession 41，pty-leak 1，全量 368。
 
+45. **全量交付前总审查的结论与任务 30 修复（合并 `0a55f2f`，全量 373）。** ①审查范围：相对 `main` 59 个文件、+10547 行；独立跑 `npm test` 368 全绿、e2e 2/2、21 个 `src` 模块均可加载、源码与测试无真实凭据、除受门控的 autostart 外无真实 `schtasks /Create`、无 `--test-force-exit`；另做 4 组变异实验全部转红。结论：需修复后交付（1 必修 + 2 建议）。②**必修（已修，`134970f`）**：`manager.createFromPhone` 先 `await api.sendCard` 再 `submitText`——连发两条时第二条抢先拿到 seq，且卡片发送失败会让函数 reject，首条提示词永远进不了 PTY，而 `bin/daemon.js:158` 对 `onPhoneMessage` 是 fire-and-forget（只 warn），于是会话白建。改为首条在**任何 await 之前**入队，`sendCard` 包 try/catch；补 2 个用例（deferred sendCard 下断言入队顺序 `['第一条','第二条']`、sendCard 拒绝时仍提交并 resolve），旧代码均真红。顺带核实「连发两条重复建会话」不可达：`onPhoneMessage` 到 `store.upsert` 全程同步。③**规格漂移（已修，`134970f`）**：规格第 414 行要求 `state/ipc.json` 的 ACL 只允许当前用户读，实现却明文写 token 不设权限。`restrictAcl` 从 `secrets.js` 导出，`startIpc` 写出后调用（可注入）；中文用户名下实测 `Get-Acl` 只剩 `<计算机名>\<用户名> Read, Synchronize`，PowerShell 重写被拒；删除仍可经目录继承，属已知窗口（见⑥）。④**复审又发现启动可挂死（已修，`e3719e0`）**：写 `ipc.json` 的 `writeFileSync` 在 ACL 的 try 之外，EACCES/EISDIR 会在 `server.listen` 回调里抛未捕获异常，`startIpc` 永不 resolve；新用例把 `ipcFile` 指向目录，旧代码 `timeout 25` 直接 exit=124 卡满。现在写盘与 ACL 同在一个 try，写失败记 `ipc.write_failed`、ACL 失败记 `ipc.acl_failed`，日志调用本身也防御（`log` 缺失或抛错都不影响启动）。`close()` 的 `unlinkSync` 同样加了 try/catch：路径是目录时 `unlinkSync` 抛 EPERM 会让关闭炸掉。`restrictAcl` 的 `icacls` 补 `timeout: 10000`，避免挂起。⑤非阻塞项（按边界未改，记此备查）：`loadConfig`/`secretStore.load` 的 `JSON.parse` 无 try/catch，`state/config.json` 损坏时只给裸解析错误、没有「重跑 `npm run setup`」提示（`store.js`/`projects.js` 都会降级，两者不一致）；`manager` 的 `log.warn` 未做防御，但生产路径恒有 logger（`bin/daemon.js:47` `createLogger`）；`ipc.json` 先写后设 ACL，理论上有极短窗口可读；`mkdirSync(stateDir)` 仍在 try 之外——state 目录建不出来时配置与 Secret 同样落不了盘，daemon 本就无法工作，故不额外兜底。⑥测试：ipc 18、manager 71，全量 368 → 373；合并后主分支独立复跑 373 全绿。
+
+
 ---
 
 ### 任务 29：修复 ConPTY conout Worker 句柄泄漏（生产侧）
@@ -8655,7 +8658,7 @@ git commit -m "fix: 自然退出后释放 ConPTY conout Worker，补子进程级
 
 ## 8. 计划完成状态
 
-- 任务数：29
+- 任务数：29（+ 任务 30：交付前总审查的修复任务，见 §7 第 45 条）
 - 覆盖规格章节：§1–§13 全部（详见 §5 对照表）
 - 未覆盖、明确留给 Plan B：Electron 多窗口、xterm.js 渲染、项目选择面板、recent 目录扫描、验收第 4、5 条
 - 凭据：本计划所有任务都不需要真实 App ID / Secret / 手机，全部用假件测试；真实凭据只在跑 `npm run setup` 和真机验收时用到
