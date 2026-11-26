@@ -102,7 +102,7 @@
      ```powershell
      powershell -NoProfile -Command "schtasks /Query /TN FeishuBridge.Daemon"
      ```
-     输出应提示找不到任务。
+     应返回非 0 退出码，并提示「错误: 系统找不到指定的文件。」（即找不到该任务）。
 2. 重启电脑，登录后等 **30–60 秒**。旧群会收到「电脑重启了，回一条消息我就接上。」。
    - 排障入口：`logs/daemon.log` 看 daemon 是否启动/报错；任务状态用 PowerShell 查：
      ```powershell

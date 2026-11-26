@@ -369,19 +369,21 @@ test('/Delete 被拒绝时 uninstall 抛错并保留脚本文件', (t) => {
   }
 });
 
-test('/Delete 报 not found 且查询已不存在时正常卸载', (t) => {
+test('任务不存在时清理脚本并返回 installed:false（不调用 /Delete）', (t) => {
   const dir = tmpdir(t);
   writeScripts(dir);
+  const calls = [];
 
   const ret = uninstall({
     stateDir: dir,
-    run: fakeRun([], (file, args) => {
+    run: fakeRun(calls, (file, args) => {
       if (args[0] === '/Query') return '"Other","N/A","就绪"';
       throw new Error('not found');
     }),
   });
 
   assert.deepEqual(ret, { ok: true, installed: false });
+  assert.equal(calls.some(([, args]) => args[0] === '/Delete'), false, '任务不存在时不应调用 /Delete');
   for (const name of [CMD_NAME, VBS_NAME, XML_NAME]) {
     assert.equal(fs.existsSync(path.join(dir, name)), false, `${name} 应被删除`);
   }
