@@ -9,6 +9,13 @@ const RETRY_DELAY_MS = 60000;
 const CMD_NAME = 'daemon-autostart.cmd';
 const VBS_NAME = 'daemon-autostart.vbs';
 const XML_NAME = 'daemon-autostart.xml';
+const SYSTEM_ROOT = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+
+// Git Bash 的 PATH 里可能先命中 MSYS 版 whoami（不认 /user 参数），
+// 因此 whoami/schtasks 一律走 System32 绝对路径，避免任何 PATH 歧义。
+function system32(exe) {
+  return path.join(SYSTEM_ROOT, 'System32', exe);
+}
 
 // 先按 GBK（中文 Windows 控制台默认代码页）解码子进程输出；运行环境没有完整 ICU
 // 时退回 UTF-8，避免把 CP936 乱码直接透传到终端。
@@ -34,7 +41,7 @@ function defaultRun(file, args) {
 }
 
 function currentSid(run = defaultRun) {
-  const out = run('whoami', ['/user', '/fo', 'csv', '/nh']);
+  const out = run(system32('whoami.exe'), ['/user', '/fo', 'csv', '/nh']);
   const found = /S-1-\d+-[\d-]+/.exec(out);
   if (!found) throw new Error(`无法从 whoami 输出中解析 SID：${out}`);
   return found[0];
@@ -150,16 +157,45 @@ function assertSafePath(p) {
   }
 }
 
+// 取 CSV 第一字段：允许引号内含逗号，去掉引号后 trim。
+function firstCsvField(line) {
+  const s = line.trim();
+  if (!s.startsWith('"')) {
+    const comma = s.indexOf(',');
+    return (comma === -1 ? s : s.slice(0, comma)).trim();
+  }
+  let out = '';
+  for (let i = 1; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '"') {
+      if (s[i + 1] === '"') {
+        out += '"';
+        i += 1;
+        continue;
+      }
+      break;
+    }
+    out += ch;
+  }
+  return out.trim();
+}
+
 function taskExists(run = defaultRun) {
   let out;
   try {
-    out = run('schtasks', ['/Query', '/FO', 'CSV', '/NH']);
+    out = run(system32('schtasks.exe'), ['/Query', '/FO', 'CSV', '/NH']);
   } catch (err) {
     throw new Error(`无法查询计划任务：${err.message}`);
   }
+  const target = TASK.toLowerCase();
   return String(out)
     .split(/\r?\n/)
-    .some((line) => line.startsWith(`"${TASK}",`));
+    .some((line) => {
+      // 真实输出里根任务首字段是 "\FeishuBridge.Daemon"；子目录任务带
+      // "\Microsoft\Windows\..." 前缀，去掉前导反斜杠后不可能等于 TASK。
+      const name = firstCsvField(line).replace(/^\\+/, '').toLowerCase();
+      return name === target;
+    });
 }
 
 function removeScripts(stateDir) {
@@ -211,7 +247,7 @@ function install({
   fs.writeFileSync(vbsPath, vbs, 'utf8');
   writeUtf16(xmlPath, xml);
   try {
-    run('schtasks', ['/Create', '/TN', TASK, '/XML', xmlPath, '/F']);
+    run(system32('schtasks.exe'), ['/Create', '/TN', TASK, '/XML', xmlPath, '/F']);
   } catch (err) {
     throw new Error(`脚本已写入 state/，但计划任务未创建：${err.message}`);
   }
@@ -224,10 +260,15 @@ function uninstall({ run = defaultRun, stateDir = paths.STATE } = {}) {
     return { ok: true, installed: false };
   }
 
-  try { run('schtasks', ['/End', '/TN', TASK]); } catch { /* 任务可能没在运行 */ }
+  try { run(system32('schtasks.exe'), ['/End', '/TN', TASK]); } catch { /* 任务可能没在运行 */ }
   try {
-    run('schtasks', ['/Delete', '/TN', TASK, '/F']);
+    run(system32('schtasks.exe'), ['/Delete', '/TN', TASK, '/F']);
   } catch (err) {
+    // /Delete 报错不一定是失败：任务可能已被并发删掉。复查确认消失才算成功。
+    if (!taskExists(run)) {
+      removeScripts(stateDir);
+      return { ok: true, installed: true };
+    }
     // 任务还注册着，但 VBS 已删会让每次登录都报“找不到脚本”，所以保留脚本。
     throw new Error(`删除计划任务失败：${err.message}（脚本文件已保留）`);
   }
@@ -271,8 +312,8 @@ function main(argv = process.argv.slice(2), options = {}) {
       return;
     }
     if (command === 'uninstall') {
-      uninstall(options.uninstall);
-      console.log(`已卸载计划任务：${TASK}`);
+      const ret = uninstall(options.uninstall);
+      console.log(ret.installed ? `已卸载计划任务：${TASK}` : `未安装，已清理残留脚本：${TASK}`);
       return;
     }
 

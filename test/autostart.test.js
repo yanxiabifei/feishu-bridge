@@ -38,8 +38,9 @@ function fakeRun(calls, impl) {
   };
 }
 
+// 真实 schtasks /Query /FO CSV /NH 的根任务首字段带前导反斜杠。
 function taskLine(name = TASK) {
-  return `"${name}","N/A","Ready"`;
+  return `"\\${name}","N/A","就绪"`;
 }
 
 function writeScripts(dir) {
@@ -144,13 +145,13 @@ test('buildXml 转义动态字段里的 & < >', () => {
   assert.ok(!xml.includes('<c>'));
 });
 
-test('currentSid 从 whoami CSV 输出解析 SID', () => {
+test('currentSid 从 whoami CSV 输出解析 SID（System32 绝对路径）', () => {
   const calls = [];
   const out = `"PC","user","S-1-5-21-1004336348-1177238915-682003330-1001","S-1-5-21-..."`;
   const sid = currentSid(fakeRun(calls, () => out));
 
   assert.equal(sid, 'S-1-5-21-1004336348-1177238915-682003330-1001');
-  assert.equal(calls[0][0], 'whoami', 'whoami 应走 PATH，不硬编码 System32');
+  assert.match(calls[0][0], /System32[\\/]whoami\.exe$/i, 'whoami 应使用 System32 绝对路径');
   assert.deepEqual(calls[0][1], ['/user', '/fo', 'csv', '/nh']);
 });
 
@@ -165,11 +166,18 @@ test('currentSid 空输出抛错并带出原始输出', () => {
   );
 });
 
-test('taskExists 按 CSV 行首匹配任务名', () => {
-  assert.equal(taskExists(() => taskLine()), true);
-  assert.equal(taskExists(() => `"Other","N/A","Ready"\r\n${taskLine()}`), true);
-  assert.equal(taskExists(() => '"FeishuBridge.Daemon2","N/A","Ready"'), false);
-  assert.equal(taskExists(() => '"Other","N/A","Ready"'), false);
+test('taskExists 解析真实 CSV 首字段（前导反斜杠/大小写/空白/逗号）', () => {
+  assert.equal(taskExists(() => taskLine()), true, '根任务首字段带前导反斜杠');
+  assert.equal(taskExists(() => `"Other","N/A","就绪"\r\n${taskLine()}`), true, '多行中命中');
+  assert.equal(taskExists(() => `"\\\\FeishuBridge.Daemon","N/A","就绪"`), true, '多个前导反斜杠');
+  assert.equal(taskExists(() => `"\\FeishuBridge.Daemon ","N/A","就绪"`), true, '任务名尾部空白应 trim');
+  assert.equal(taskExists(() => `"\\feishubridge.daemon","N/A","就绪"`), true, '任务名大小写不敏感');
+  assert.equal(taskExists(() => `"\\Microsoft\\Windows\\FeishuBridge.Daemon","N/A","就绪"`), false, '子目录任务不匹配');
+  assert.equal(taskExists(() => `"\\Microsoft\\Windows\\Foo","N/A","就绪"`), false, '其他子目录任务不匹配');
+  assert.equal(taskExists(() => `"\\FeishuBridge.Daemon2","N/A","就绪"`), false, '前缀相同的其他任务不匹配');
+  assert.equal(taskExists(() => '"Other,Task","N/A","就绪"'), false, '引号内逗号不应误判');
+  assert.equal(taskExists(() => `"\\FeishuBridge.Daemon,Extra","N/A","就绪"`), false, '任务名内含逗号不应误判');
+  assert.equal(taskExists(() => '"Other","N/A","就绪"'), false);
 });
 
 test('taskExists 查询失败时抛中文错误，不当成不存在', () => {
@@ -205,7 +213,7 @@ test('install 写三个文件并调用一次 schtasks（不落真实命令）', 
   assert.deepEqual([...head], [0xFF, 0xFE], 'xml 应为 UTF-16LE BOM');
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], 'schtasks');
+  assert.match(calls[0][0], /System32[\\/]schtasks\.exe$/i);
   const args = calls[0][1];
   for (const part of ['/Create', '/TN', TASK, '/XML', xmlPath, '/F']) {
     assert.ok(args.includes(part), `schtasks 参数应包含 ${part}`);
@@ -368,12 +376,36 @@ test('/Delete 报 not found 且查询已不存在时正常卸载', (t) => {
   const ret = uninstall({
     stateDir: dir,
     run: fakeRun([], (file, args) => {
-      if (args[0] === '/Query') return '"Other","N/A","Ready"';
+      if (args[0] === '/Query') return '"Other","N/A","就绪"';
       throw new Error('not found');
     }),
   });
 
   assert.deepEqual(ret, { ok: true, installed: false });
+  for (const name of [CMD_NAME, VBS_NAME, XML_NAME]) {
+    assert.equal(fs.existsSync(path.join(dir, name)), false, `${name} 应被删除`);
+  }
+});
+
+test('/Delete 报 not found 后复查该任务已不存在，视为卸载成功', (t) => {
+  const dir = tmpdir(t);
+  writeScripts(dir);
+  let queries = 0;
+
+  const ret = uninstall({
+    stateDir: dir,
+    run: fakeRun([], (file, args) => {
+      if (args[0] === '/Query') {
+        queries += 1;
+        return queries === 1 ? taskLine() : '"Other","N/A","就绪"';
+      }
+      if (args[0] === '/Delete') throw new Error('ERROR: 系统找不到指定的文件。');
+      return '';
+    }),
+  });
+
+  assert.deepEqual(ret, { ok: true, installed: true });
+  assert.ok(queries >= 2, 'Delete 失败后应重新查询');
   for (const name of [CMD_NAME, VBS_NAME, XML_NAME]) {
     assert.equal(fs.existsSync(path.join(dir, name)), false, `${name} 应被删除`);
   }
@@ -409,9 +441,10 @@ test('status 用 CSV 全量查询并判断是否已安装', () => {
   const installed = status({ run: fakeRun(calls, () => taskLine()) });
 
   assert.deepEqual(installed, { installed: true });
-  assert.deepEqual(calls[0], ['schtasks', ['/Query', '/FO', 'CSV', '/NH']]);
+  assert.match(calls[0][0], /System32[\\/]schtasks\.exe$/i, 'schtasks 应使用 System32 绝对路径');
+  assert.deepEqual(calls[0][1], ['/Query', '/FO', 'CSV', '/NH']);
 
-  const absent = status({ run: fakeRun([], () => '"Other","N/A","Ready"') });
+  const absent = status({ run: fakeRun([], () => '"Other","N/A","就绪"') });
   assert.deepEqual(absent, { installed: false });
 });
 
@@ -451,4 +484,39 @@ test('main：status 查询失败时退出码 1 且中文报错', () => {
   assert.equal(code, 1);
   assert.match(stderr, /错误：无法查询计划任务：服务未启动/);
   assert.doesNotMatch(stderr, /^\s+at /m);
+});
+
+test('main：uninstall 任务不存在时提示已清理残留脚本', (t) => {
+  const dir = tmpdir(t);
+  writeScripts(dir);
+
+  const { code, stdout } = runMain(['uninstall'], {
+    uninstall: { stateDir: dir, run: () => '"Other","N/A","就绪"' },
+  });
+
+  assert.ok(!code, '成功路径退出码应为 0');
+  assert.match(stdout, /未安装，已清理残留脚本/);
+  for (const name of [CMD_NAME, VBS_NAME, XML_NAME]) {
+    assert.equal(fs.existsSync(path.join(dir, name)), false, `${name} 应被删除`);
+  }
+});
+
+test('main：uninstall 成功时提示已卸载计划任务', (t) => {
+  const dir = tmpdir(t);
+  writeScripts(dir);
+  let deleted = false;
+
+  const { code, stdout } = runMain(['uninstall'], {
+    uninstall: {
+      stateDir: dir,
+      run: (file, args) => {
+        if (args[0] === '/Query') return deleted ? '"Other","N/A","就绪"' : taskLine();
+        if (args[0] === '/Delete') { deleted = true; return ''; }
+        return '';
+      },
+    },
+  });
+
+  assert.ok(!code);
+  assert.match(stdout, /已卸载计划任务：FeishuBridge\.Daemon/);
 });
