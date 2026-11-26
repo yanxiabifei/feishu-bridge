@@ -15,6 +15,7 @@ function harness(overrides = {}) {
   let exitHandler = () => {};
   let ready = true;
   let clock = 1000;
+  let killCalls = 0;
 
   const pty = {
     pid: 4242,
@@ -22,7 +23,7 @@ function harness(overrides = {}) {
     onExit(fn) { exitHandler = fn; },
     write(s) { written.push(s); },
     resize(c, r) { resized.push([c, r]); },
-    kill() { exitHandler({ exitCode: 0 }); },
+    kill() { killCalls++; exitHandler({ exitCode: 0 }); },
   };
 
   const screen = {
@@ -61,6 +62,7 @@ function harness(overrides = {}) {
 
   return {
     ps, written, events, resized, screenResized, order, session, launchCalls, factoryCalls,
+    get killCalls() { return killCalls; },
     screenText() { return lastScreen; },
     setReady(v) { ready = v; },
     setInBox(v) { inBox = v; },
@@ -268,6 +270,17 @@ test('进程退出后提交不写入', () => {
   assert.strictEqual(result, 'closed');
   assert.strictEqual(h.written.length, 0);
   assert.strictEqual(h.events.filter((e) => e.type === 'exit').length, 1);
+});
+
+test('agent 自然退出后对原始 pty 调一次 kill（释放 conout Worker）', () => {
+  const h = harness();
+  h.ps.start();
+  h.ps._pollReady();
+  assert.strictEqual(h.ps.status, 'idle');
+  h.emitExit(0);
+  assert.strictEqual(h.ps.status, 'closed');
+  assert.strictEqual(h.killCalls, 1, '自然退出后必须补一次 pty.kill()，否则 conout Worker 泄漏');
+  assert.strictEqual(h.events.filter((e) => e.type === 'exit').length, 1, 'exit 事件不能重复');
 });
 
 // ---- 事件契约对齐用例 ----

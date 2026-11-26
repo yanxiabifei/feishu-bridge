@@ -35,8 +35,8 @@ function makeSession(onEvent) {
     queueFactory: createQueue,
     onEvent,
   });
-  // ps.kill() 在 hasExited 后被 disposed 守卫短路，不会释放 conout worker 线程；
-  // 直接 kill 原始 pty 才会触发 dispose，否则 node --test 永不退出。
+  // 任务 29 起 onExit 会自己 pty.kill()；这里保留 raw.kill() 作双保险，
+  // 防止将来有人回退修复时整个测试轮挂死。
   return {
     ps,
     killRaw: () => { try { raw && raw.kill(); } catch { /* 已退出 */ } },

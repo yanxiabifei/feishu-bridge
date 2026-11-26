@@ -95,6 +95,14 @@ function createPtySession({
     session.status = 'closed';
     disposed = true;
     queue.drain();
+    // node-pty 在子进程自然退出后不会自己 dispose：WindowsPtyAgent.kill() 被
+    // hasExited 守卫短路，conout Worker 的 MessagePort 不释放，事件循环被撑住。
+    // 对原始 pty 再调一次 kill 才会走 dispose 路径；先把 pty 摘掉防止重入。
+    if (pty) {
+      const p = pty;
+      pty = null;
+      try { p.kill(); } catch { /* 已经退出 */ }
+    }
     disposeScreen();
     emitExitOnce(info && info.exitCode, info && info.signal);
   }
