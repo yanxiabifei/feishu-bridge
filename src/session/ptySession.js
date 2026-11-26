@@ -95,6 +95,16 @@ function createPtySession({
     session.status = 'closed';
     disposed = true;
     queue.drain();
+    // node-pty 在子进程自然退出后不会自己 dispose：windowsTerminal.js:97-100 的
+    // socket close 只调 _close()，从不调 WindowsPtyAgent.kill()；而 conout Worker
+    // 的 dispose() 只存在于 WindowsPtyAgent.kill() 内部（windowsPtyAgent.js:151），
+    // 于是 MessagePort 一直撑住事件循环。对原始 pty 再调一次 kill 才走 dispose；
+    // 先把 pty 摘掉防止重入。
+    if (pty) {
+      const p = pty;
+      pty = null;
+      try { p.kill(); } catch { /* 已经退出 */ }
+    }
     disposeScreen();
     emitExitOnce(info && info.exitCode, info && info.signal);
   }
