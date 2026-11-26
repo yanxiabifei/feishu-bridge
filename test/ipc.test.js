@@ -184,6 +184,31 @@ test('ACL 失败只记 warn，ipc.json 仍写出且 daemon 正常启动', async 
   }
 });
 
+test('ipc.json 写入失败只记 warn，startIpc 仍 resolve 且可关闭', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-ipc-write-fail-'));
+  const ipcFile = path.join(dir, 'ipc.json');
+  fs.mkdirSync(ipcFile);   // 路径是目录 → writeFileSync 抛错
+  const lg = makeLog();
+  const ipc = await startIpc({
+    port: 0,
+    token: 'tok-1',
+    log: lg,
+    ipcFile,
+    handlers: {},
+    acl: () => {},
+  });
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  try {
+    assert.ok(ipc, '写入失败不应让 startIpc 挂起');
+    assert.strictEqual(fs.statSync(ipcFile).isDirectory(), true);
+    const warn = lg.warns.find((w) => w.event === 'ipc.write_failed');
+    assert.ok(warn, '未记录 ipc.write_failed');
+    assert.ok(String(warn.fields.error).length > 0);
+  } finally {
+    await ipc.close();
+  }
+});
+
 test('onHookStop 异步 rejection 只记 warn，不崩 daemon', async (t) => {
   const lg = makeLog();
   const ipc = await startIpc({

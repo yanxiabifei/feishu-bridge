@@ -22,6 +22,7 @@ function runPowerShell(script, inputB64) {
 function restrictAcl(file) {
   execFileSync('icacls', [file, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:R`], {
     windowsHide: true,
+    timeout: 10000,
   });
 }
 
