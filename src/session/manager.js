@@ -205,12 +205,18 @@ function createManager({
       return null;
     }
 
-    await api.sendCard(chatId, cards.noticeCard({
-      title: '✅ 已开工',
-      template: 'green',
-      text: `${labelOf(record)} · \`${record.cwd}\`\n\n${parsed.prompt ? '第一条已进队，处理中…' : '可以直接说话。'}`,
-    }));
+    // 首条必须在任何 await 之前入队：否则连发两条时第二条会抢先拿到 seq，
+    // 且卡片发送失败会让函数 reject、首条提示词永远写不进去。
     if (parsed.prompt) sessions.get(record.id).submitText(parsed.prompt, 'phone');
+    try {
+      await api.sendCard(chatId, cards.noticeCard({
+        title: '✅ 已开工',
+        template: 'green',
+        text: `${labelOf(record)} · \`${record.cwd}\`\n\n${parsed.prompt ? '第一条已进队，处理中…' : '可以直接说话。'}`,
+      }));
+    } catch (err) {
+      log.warn('已开工卡片发送失败', { sessionId: record.id, message: errMessage(err) });
+    }
     return record;
   }
 

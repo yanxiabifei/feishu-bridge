@@ -50,4 +50,6 @@ function createSecretStore({ file, runner = runPowerShell, acl = restrictAcl, lo
   };
 }
 
-module.exports = { createSecretStore, runPowerShell, PS_PROTECT, PS_UNPROTECT };
+module.exports = {
+  createSecretStore, runPowerShell, restrictAcl, PS_PROTECT, PS_UNPROTECT,
+};
