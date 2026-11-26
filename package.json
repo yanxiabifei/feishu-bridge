@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node bin/daemon.js",
     "setup": "node bin/setup.js",
+    "autostart": "node scripts/autostart.js",
     "test": "node --test \"test/**/*.test.js\"",
     "test:e2e": "node --test test/e2e.test.js",
     "check:logs": "node scripts/check-logs.js"

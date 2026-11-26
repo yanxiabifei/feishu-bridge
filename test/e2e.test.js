@@ -52,7 +52,10 @@ test('真实 ConPTY：就绪 → 写入 → 回显 → 连发两条按序执行'
       await waitFor(() => ps.status === 'idle'),
       `10 秒内未就绪；最后事件：${JSON.stringify(events.slice(-3))}`,
     );
-    assert.ok(ps.screen.snapshot().includes('FAKE_AGENT_READY'));
+    assert.ok(
+      await waitFor(() => ps.screen.snapshot().includes('FAKE_AGENT_READY'), { timeout: 5000 }),
+      `未等到 FAKE_AGENT_READY；屏幕尾部：${JSON.stringify(ps.screen.snapshot().slice(-500))}`,
+    );
 
     assert.strictEqual(ps.submitText('ping-1', 'phone'), 'queued');
     // 第二条应排队（第一条还在跑），不能立刻写进终端
