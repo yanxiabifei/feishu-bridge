@@ -10,14 +10,33 @@ const CMD_NAME = 'daemon-autostart.cmd';
 const VBS_NAME = 'daemon-autostart.vbs';
 const XML_NAME = 'daemon-autostart.xml';
 
+// 先按 GBK（中文 Windows 控制台默认代码页）解码子进程输出；运行环境没有完整 ICU
+// 时退回 UTF-8，避免把 CP936 乱码直接透传到终端。
+function decodeOutput(buf) {
+  if (buf == null) return '';
+  if (typeof buf === 'string') return buf;
+  try {
+    return new TextDecoder('gbk').decode(buf);
+  } catch {
+    return Buffer.isBuffer(buf) ? buf.toString('utf8') : String(buf);
+  }
+}
+
 function defaultRun(file, args) {
-  return execFileSync(file, args, { encoding: 'utf8', windowsHide: true }).trim();
+  let stdout;
+  try {
+    stdout = execFileSync(file, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (err) {
+    const detail = decodeOutput(err.stderr).trim() || decodeOutput(err.stdout).trim() || err.message;
+    throw new Error(detail);
+  }
+  return decodeOutput(stdout).trim();
 }
 
 function currentSid(run = defaultRun) {
-  const out = run('C:\\Windows\\System32\\whoami.exe', ['/user', '/fo', 'csv', '/nh']);
-  const found = /S-1-5-[\d-]+/.exec(out);
-  if (!found) throw new Error('无法确定当前用户 SID');
+  const out = run('whoami', ['/user', '/fo', 'csv', '/nh']);
+  const found = /S-1-\d+-[\d-]+/.exec(out);
+  if (!found) throw new Error(`无法从 whoami 输出中解析 SID：${out}`);
   return found[0];
 }
 
@@ -29,6 +48,8 @@ function escapeXml(s) {
 }
 
 function buildCmd({ root, execPath, logPath }) {
+  // 这些路径在 install 中已校验为纯 ASCII 且不含 %，UTF-8 写入的字节与 CP936
+  // 解码 ASCII 完全一致，cmd/wscript 读脚本不会乱码，因此无需另存 UTF-16。
   return [
     '@echo off',
     `cd /d "${root}"`,
@@ -37,16 +58,28 @@ function buildCmd({ root, execPath, logPath }) {
 }
 
 function buildVbs({ cmdPath, root, wakeMs = WAKE_DELAY_MS, retryMs = RETRY_DELAY_MS }) {
+  // 同上：cmdPath/root 在 install 中已校验为纯 ASCII，按 UTF-8 写入即可被 wscript 正确读取。
   return [
     'Option Explicit',
     'Dim sh, rc',
     'Set sh = CreateObject("WScript.Shell")',
-    `sh.CurrentDirectory = "${root}"`,
     `WScript.Sleep ${wakeMs}`,
+    'On Error Resume Next',
     'Do',
-    `  rc = sh.Run(Chr(34) & "${cmdPath}" & Chr(34), 0, True)`,
-    '  If rc = 0 Then Exit Do',
-    `  WScript.Sleep ${retryMs}`,
+    `  sh.CurrentDirectory = "${root}"`,
+    '  If Err.Number <> 0 Then',
+    '    Err.Clear',
+    `    WScript.Sleep ${retryMs}`,
+    '  Else',
+    `    rc = sh.Run(Chr(34) & "${cmdPath}" & Chr(34), 0, True)`,
+    '    If Err.Number <> 0 Then',
+    '      Err.Clear',
+    `      WScript.Sleep ${retryMs}`,
+    '    ElseIf rc = 0 Then Exit Do',
+    '    Else',
+    `      WScript.Sleep ${retryMs}`,
+    '    End If',
+    '  End If',
     'Loop',
   ].join('\r\n') + '\r\n';
 }
@@ -78,7 +111,7 @@ function buildXml({ sid, vbsPath }) {
     '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
     '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>',
     '    <AllowHardTerminate>true</AllowHardTerminate>',
-    '    <StartWhenAvailable>false</StartWhenAvailable>',
+    '    <StartWhenAvailable>true</StartWhenAvailable>',
     '    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>',
     '    <IdleSettings>',
     '      <StopOnIdleEnd>false</StopOnIdleEnd>',
@@ -103,7 +136,41 @@ function buildXml({ sid, vbsPath }) {
 }
 
 function writeUtf16(file, text) {
-  fs.writeFileSync(file, '\uFEFF' + text, 'utf16le');
+  const bom = Buffer.from([0xFF, 0xFE]);
+  fs.writeFileSync(file, Buffer.concat([bom, Buffer.from(text, 'utf16le')]));
+}
+
+// 嵌入 VBS/CMD 的路径必须纯 ASCII 且不含 %：前者避免 CP936 解码乱码，
+// 后者避免 cmd 在双引号内仍展开 %VAR%。
+const SAFE_PATH = /^[\x20-\x7E]+$/;
+
+function assertSafePath(p) {
+  if (!SAFE_PATH.test(p) || p.includes('%')) {
+    throw new Error(`开机自启暂不支持含中文/非 ASCII 或 % 的路径：${p}。请把工程和 Node 移到纯英文路径后重试。`);
+  }
+}
+
+function taskExists(run = defaultRun) {
+  let out;
+  try {
+    out = run('schtasks', ['/Query', '/FO', 'CSV', '/NH']);
+  } catch (err) {
+    throw new Error(`无法查询计划任务：${err.message}`);
+  }
+  return String(out)
+    .split(/\r?\n/)
+    .some((line) => line.startsWith(`"${TASK}",`));
+}
+
+function removeScripts(stateDir) {
+  for (const name of [CMD_NAME, VBS_NAME, XML_NAME]) {
+    const file = path.join(stateDir, name);
+    try {
+      fs.rmSync(file, { force: true });
+    } catch (err) {
+      throw new Error(`删除脚本文件失败：${file}（${err.message}）`);
+    }
+  }
 }
 
 function install({
@@ -119,10 +186,10 @@ function install({
   const vbsPath = path.join(stateDir, VBS_NAME);
   const xmlPath = path.join(stateDir, XML_NAME);
 
-  const realSid = sid || currentSid(run);
-  const cmd = buildCmd({ root, execPath, logPath });
-  const vbs = buildVbs({ cmdPath, root });
-  const xml = buildXml({ sid: realSid, vbsPath });
+  // 写文件、建目录、调 schtasks 之前先完成校验，失败时不留任何副作用。
+  for (const p of [root, execPath, logPath, cmdPath, vbsPath, xmlPath]) {
+    assertSafePath(p);
+  }
 
   if (dryRun) {
     console.log(`cmd：${cmdPath}`);
@@ -132,37 +199,52 @@ function install({
     return { ok: true, dryRun: true, files: [cmdPath, vbsPath, xmlPath] };
   }
 
+  const realSid = sid || currentSid(run);
+  const cmd = buildCmd({ root, execPath, logPath });
+  const vbs = buildVbs({ cmdPath, root });
+  const xml = buildXml({ sid: realSid, vbsPath });
+
   fs.mkdirSync(stateDir, { recursive: true });
   // cmd 里用 >> 重定向日志，父目录不存在会直接失败，daemon 就起不来
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
   fs.writeFileSync(cmdPath, cmd, 'utf8');
   fs.writeFileSync(vbsPath, vbs, 'utf8');
   writeUtf16(xmlPath, xml);
-  run('schtasks', ['/Create', '/TN', TASK, '/XML', xmlPath, '/F']);
+  try {
+    run('schtasks', ['/Create', '/TN', TASK, '/XML', xmlPath, '/F']);
+  } catch (err) {
+    throw new Error(`脚本已写入 state/，但计划任务未创建：${err.message}`);
+  }
   return { ok: true, dryRun: false, files: [cmdPath, vbsPath, xmlPath], sid: realSid };
 }
 
 function uninstall({ run = defaultRun, stateDir = paths.STATE } = {}) {
-  try { run('schtasks', ['/End', '/TN', TASK]); } catch { /* 任务可能没在运行 */ }
-  try { run('schtasks', ['/Delete', '/TN', TASK, '/F']); } catch { /* 任务可能不存在 */ }
-  for (const name of [CMD_NAME, VBS_NAME, XML_NAME]) {
-    fs.rmSync(path.join(stateDir, name), { force: true });
+  if (!taskExists(run)) {
+    removeScripts(stateDir);
+    return { ok: true, installed: false };
   }
-  return { ok: true };
+
+  try { run('schtasks', ['/End', '/TN', TASK]); } catch { /* 任务可能没在运行 */ }
+  try {
+    run('schtasks', ['/Delete', '/TN', TASK, '/F']);
+  } catch (err) {
+    // 任务还注册着，但 VBS 已删会让每次登录都报“找不到脚本”，所以保留脚本。
+    throw new Error(`删除计划任务失败：${err.message}（脚本文件已保留）`);
+  }
+  if (taskExists(run)) {
+    throw new Error('删除计划任务失败：任务仍然存在（脚本文件已保留）');
+  }
+  removeScripts(stateDir);
+  return { ok: true, installed: true };
 }
 
 function status({ run = defaultRun } = {}) {
-  try {
-    run('schtasks', ['/Query', '/TN', TASK]);
-    return { installed: true };
-  } catch {
-    return { installed: false };
-  }
+  return { installed: taskExists(run) };
 }
 
 const USAGE = '用法：node scripts/autostart.js <install|uninstall|status> [--dry-run]';
 
-function main(argv = process.argv.slice(2)) {
+function main(argv = process.argv.slice(2), options = {}) {
   const [command = 'status', ...rest] = argv;
 
   if (!['install', 'uninstall', 'status'].includes(command)) {
@@ -181,22 +263,39 @@ function main(argv = process.argv.slice(2)) {
     return;
   }
 
-  if (command === 'install') {
-    const dryRun = rest.includes('--dry-run');
-    install({ dryRun });
-    console.log(dryRun ? '（dry-run：未写入文件，也未创建计划任务）' : `已安装计划任务：${TASK}`);
-    return;
-  }
-  if (command === 'uninstall') {
-    uninstall();
-    console.log(`已卸载计划任务：${TASK}`);
-    return;
-  }
+  try {
+    if (command === 'install') {
+      const dryRun = rest.includes('--dry-run');
+      install({ ...options.install, dryRun });
+      console.log(dryRun ? '（dry-run：未写入文件，也未创建计划任务）' : `已安装计划任务：${TASK}`);
+      return;
+    }
+    if (command === 'uninstall') {
+      uninstall(options.uninstall);
+      console.log(`已卸载计划任务：${TASK}`);
+      return;
+    }
 
-  const { installed } = status();
-  console.log(installed ? `已安装：${TASK}` : `未安装：${TASK}`);
+    const { installed } = status(options.status);
+    console.log(installed ? `已安装：${TASK}` : `未安装：${TASK}`);
+  } catch (err) {
+    // 只输出可读中文原因，不把裸栈丢给用户。
+    console.error('错误：' + err.message);
+    process.exitCode = 1;
+  }
 }
 
-module.exports = { TASK, buildCmd, buildVbs, buildXml, install, uninstall, status, main };
+module.exports = {
+  TASK,
+  buildCmd,
+  buildVbs,
+  buildXml,
+  currentSid,
+  taskExists,
+  install,
+  uninstall,
+  status,
+  main,
+};
 
 if (require.main === module) main();
