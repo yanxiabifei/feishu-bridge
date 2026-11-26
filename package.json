@@ -1,0 +1,21 @@
+{
+  "name": "feishu-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "飞书双向 AI 终端桥：手机与本地 Claude Code / Codex 会话双向同步",
+  "main": "bin/daemon.js",
+  "scripts": {
+    "start": "node bin/daemon.js",
+    "setup": "node bin/setup.js",
+    "autostart": "node scripts/autostart.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:e2e": "node --test test/e2e.test.js",
+    "check:logs": "node scripts/check-logs.js"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.77.0",
+    "@xterm/headless": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "ws": "^8.23.0"
+  }
+}

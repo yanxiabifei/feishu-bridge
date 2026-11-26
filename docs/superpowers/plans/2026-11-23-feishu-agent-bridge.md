@@ -148,13 +148,13 @@ parseChatId(evt) -> string                                  // 群解散 / 机�
 trustKey(cwd) -> string
 ensureTrusted({ claudeJsonPath, cwd }) -> boolean       // true = 本次写入过
 writeHookFile({ hooksDir, sessionId, hookScript }) -> path
-buildLaunch({ session, config }) -> { file, args, cwd }  // agent=claude|codex
+buildLaunch({ session, config, hooksDir, hookScript, claudeJsonPath }) -> { file, args, cwd }
 
 // src/agent/tools.js
 summarizeToolUse(jsonlText) -> string   // 如 '🔧 改了 3 个文件 · Bash×2'，无工具调用返回 ''
 
 // src/session/ptySession.js
-createPtySession({ session, launch, ptyFactory, screenFactory, queueFactory, log, onEvent, now })
+createPtySession({ session, launch, ptyFactory, screenFactory, queueFactory, log, onEvent, now, queueLimit })
   -> { start(), pollReady(), submitText(text, origin, { force? } = {}), onPcKeys(data), resize(cols, rows),
        snapshot(), kill(), get status(), get lastInput(), get screen(), needsConfirm(), releaseTurn(), session }
 // snapshot() 返回可序列化的会话状态对象（IPC 用）；屏幕文本走 get screen().snapshot({ lines })
@@ -180,7 +180,7 @@ createManager({ config, api, store, log, createPtySession, ipc?, now?, rand?, fs
   restoreAll() -> Promise<void>,
   shutdown() -> Promise<void>,                                  // 电脑退出：杀 PTY、标记 interrupted、不发通知不解散群
   tick() -> Promise<void>,                                      // 30 秒巡检由 bin/daemon.js 调用
-  list() -> Array<record>                                       // IPC {type:'list'} 的应答；活会话给快照
+  list() -> Array<record>                                       // IPC {type:'list'} 的应答：记录为准，活会话叠加快照
 }
 // createPtySession 是装配阶段绑定好的工厂，manager 只传 { session, onEvent, queueLimit, now }
 // PTY 退出由 ptySession 自己 emit 'exit'，manager 在 onEvent 里统一处理（不设 onPtyExit 入口）
@@ -8387,11 +8387,278 @@ git commit -m "feat: 私聊总控面板（会话列表 / 结束会话 / 改别�
 
 11. **私聊 = 总控面板，私聊里说什么都不会建会话。** 规格 §5.1 只描述「拉群 @机器人」。现在私聊固定按控制面板解析（列表 / 结束 / 改名 / 帮助），随口说话只回帮助文字。这样手机上有两个入口：干活去群，管理去私聊，互不误伤。
 
+> 以下 12–15 是**实现阶段**发现的计划自身缺陷与已知取舍，已裁决并落地，记录在此不再回头改。
+
+12. **`truncate` 的省略字数算式修正（任务 11）。** 计划原文按「头部取满 `limit`、再拼 1500 字尾部」计算，输出会比原文还长（9003 字输入 → 9523 字输出），与自身测试 `r.text.length < long.length` 矛盾。实现改为：`head = text.slice(0, limit - TAIL_CHARS)`、`omitted = text.length - limit`。行为等价于「保头 6500 + 保尾 1500 + 一行截断标记」，输出稳定压在 8000 出头，省略字数如实（9003 → 1003）。
+
+13. **会话表容错的分界（任务 3）。** 计划步骤里写的「损坏时备份成 `.corrupt-`」只适用于**解析失败**（真正的坏 JSON）。JSON 合法但内容为 `null`、或 `sessions` 不是数组时，`store.load()` 的处理是**直接重置为空表**，不产生备份——按计划正文的参考实现口径执行。解析失败的备份行为保持不变。
+
+14. **IPC 的 WebSocket 鉴权测试删掉了一行（任务 8）。** 计划测试在错误 token 的客户端上写 `bad.on('open', () => resolve(false))`，期望它永远不触发 `open`。但 ws 8.23 下服务端在 `connection` 里 `ws.close(4001)` 属于握手后的带内关闭，客户端事件顺序必然是先 `open` 再 `close`，该断言恒失败——是计划测试的缺陷，不是实现问题。**实现保持与计划逐字一致**（`close(4001)`），测试只删掉那一行 `open` 监听，「错误 token 被断开」的断言（`close` 码 4001）保留。同时给测试补了 `t.after(() => ipc.close())`，避免断言失败时 server 未关闭导致 `node --test` 挂住。
+
+15. **首句解析的两条已知限制（任务 5）。** 一是盘符路径按空白截断，`D:/work 副本 帮我修` 只会取 `D:/work`——带空格的项目目录请用别名，别用路径；二是分隔符 `SEP` 只认空白与 `,，:：、`，不认 `。！？；`，所以 `卡牌。帮我看看` 不会切出「卡牌」这个别名，会落到默认目录。两条都是计划的显式取舍（正则即契约），v1 不改；若真机上确实别扭，再把中文句末标点并进 `SEP` 并补测试。
+
+16. **`src/paths.js` 的导入写法与计划不同（任务 15）。** 计划任务 15 的参考代码写 `const { paths } = require('../paths')`，但该模块导出的是对象本身（`ROOT, STATE, …` 直接在顶层），没有 `paths` 键。实际写法必须是 `const paths = require('../paths')`，后续任务照此引用。
+
+17. **首句路径不存在时的降级（任务 5）。** `parseFirstMessage` 对 `source: 'path-missing'` 的处理是：不建目录、不猜，直接把**整条原文**当作 prompt 送进默认目录的会话。计划没写这条分支的语义，这里固定为「宁可原文全给模型，也不悄悄丢掉路径片段」。
+
+18. **Codex 的提示符是 `›` 不是 `❯`（任务 12）。** 计划里的屏幕判定只写了 Claude 的 `❯`（U+276F）。实测 Codex 0.166.0 二进制含 17 处 `›`（U+203A）、0 处 `❯`。`screen.js` 的 `PROMPT_RE` 同时接受两个字形，并且必须**锚定行首**（允许前导空白）；裸 `includes` 会被信任对话框和正文里的 `❯` 骗过。
+
+19. **卡片必须用「卡片实体」三件套更新（任务 10）。** 计划任务说明里曾出现 `updateCard` / `updateMessage`，落地以规格 §6 为准：`createCardEntity(card)` 创建，首次 `sendCardEntity(chatId, cardId)` 发出，后续用 `updateCardEntity(cardId, card, seq)` 原地更新。飞书长连接场景下没有别的可靠更新路径。
+
+20. **卡片 2.0 的若干硬约束（任务 10、11）。** `config` 里只能有 `update_multi: true`；`wide_screen_mode` 是 1.0 专属字段，2.0 不许带；行内标签（如 `<font>`）里的 `<` 要写成 `&#60;`，否则卡片 JSON 解析失败；代码围栏连续 3 个以上反引号会破坏渲染，发出前插入 U+200B 打断；页脚用 `<font color='grey'>`。照计划里的 1.0 写法会直接发不出卡片。
+
+21. **日志脱敏只覆盖 `fields`，`event` 必须是固定字符串（任务 8）。** `createLogger` 的 `redact()` 只处理 `fields`，`event` 原样落盘。上一版 IPC 错误日志把 handler 名和错误文本拼进 `event`，真实探针确认 token 明文进了 JSONL。已改为 `log.warn('ipc.handler_error', { handler, error })`，handler 名再经白名单收敛。**后续任何模块都不许往 `event` 里拼动态内容**，作为硬规则。
+
+22. **hook-stop 的看门狗不能靠「收到响应头就返回」代替（任务 7）。** 修 bug 时实测：只删掉 `BUDGET_MS` 看门狗，drip 测试仍然绿——因为「收到响应头就 `res.destroy()`」独立地解开了挂起；只有换回原始实现才能让测试变红。结论：看门狗作为绝对兜底保留（`BUDGET_MS=1800` 同步设置、`unref()`、`finally` 清除、所有路径 `exit 0`、stdout 为空），测试需能区分这两层。
+
+23. **富文本里的代码块必须保持原文（任务 23）。** `post` 富文本解析会把 `code_block` 的文本和普通文本一起过 `stripMentions` + 空白压缩，实测 4 个空格变 1 个、3 个换行变 2 个、`@_user_1` 被删——代码直接坏掉。已改为 `code_block` 跳过剥离与归一化，并补保真测试。
+
+24. **SDK 1.77.0 的日志开关有 falsy 陷阱（任务 13）。** `lib/index.js` 里是 `new LoggerProxy(params.loggerLevel || LoggerLevel.info, ...)`，`fatal = 0` 是 falsy，只设级别会被回落成 `info`，长连接一启动就往 stdout 打 `[info]: [ 'event-dispatch is ready' ]`。必须**同时**注入一个五方法 noop logger；`WSClient` 那边是解构默认值（只有 `undefined` 才回落），传 0 有效。测试要同时锁定「级别 = 0」和「注入了 logger」。
+
+25. **`turn-end` 必须先发，再 `releaseTurn()`（任务 20）。** `releaseTurn()` → `queue.release()` 会**同步**泵出下一条排队消息并紧接着发 `turn-start(B)`。若先释放再发 `turn-end(A)`，事件顺序会变成 `turn-start(A) → input(A) → input(B) → turn-start(B) → turn-end(A)`，A 的结束事件被排到 B 开始之后。正确顺序是 `emit({type:'turn-end'})` 在前、`releaseTurn()` 在后；`test/ptySession.test.js` 用 `types.slice(-2)` 锁死这个顺序。
+
+26. **Codex 的轮次结束是「静默推断」，不是事件（任务 20）。** Codex 0.166 没有 Stop hook，判定为：`status === 'running'` 且 `isReady()` 且 `inInputBox()` 且距最后一次写入 ≥ 1500 ms（`CODEX_MIN_TURN_MS`），且连续 3 次 200 ms 轮询稳定（`CODEX_SETTLE_POLLS`）。已知风险：**长时间只在思考/跑工具而不刷新画面的回合会被误判结束**。若真机出现，优先调大 `CODEX_MIN_TURN_MS` 或改用画面尾部变化探测；当前 `turn-end` 事件也不带 `seq`，manager 侧不做持久化（留给任务 22/组合时按需补）。
+
+27. **任务 16 的安全与竞态边界（已知、不阻断）。** ①主人校验是 fail-open：`config.ownerOpenId && senderOpenId && senderOpenId !== owner` 才拦截，`senderOpenId` 缺失时放行；真实事件路径上 `events.js` 保证 open_id 必存在，但 daemon 装配时必须校验 `ownerOpenId` 非空，否则所有人可用。②带附件的消息在 `await attachMedia`（下载/落盘）期间若会话恰好退出，`submitText` 返回 `'closed'` 后消息被静默丢弃，连「会话已停」提示都没有——纯文本路径无此窗口（守卫到写入之间无 await）。③未登记群的首条消息若带附件，附件会被丢弃（`createFromPhone` 不接收 media）。④同名文件类附件按原始 `file_name` 落盘，同会话连发两个 `report.md` 后者覆盖前者。
+
+28. **`setup` 的 `ws.close()` 只是「发起」不是「等完成」（任务 14）。** `finally { Promise.resolve(ws.close()).catch(() => {}) }` 已满足测试，但如果 `ws.start()` 同步抛错（SDK 内部非 Promise 路径），`finally` 里的调用仍可能同步抛并掩盖原始错误。装配阶段如需加固，改成 `Promise.resolve().then(() => ws.close()).catch(() => {})`；不影响验收。
+
+29. **任务 15 的两处小冗余（已知）。** ①`loadProjectsFn` 同时用了 `projects.default || config.defaultCwd` 和 `parseFirstMessage` 的 `defaultCwd` 兜底，两处等价，任一处失效仍有另一处，非缺陷。②`newId()` 用 `now()` + 随机 3 位，固定时钟（测试注入）下同毫秒创建多个会话理论可碰撞；真实时钟 + 创建走串行路径，实际不可达。
+
+30. **会话状态机的写入前置条件（任务 9）。** 只有 `idle` 才能写 PTY：`canWrite = status === 'idle' && screen.isReady() && screen.inInputBox()`；`starting` 期间到 `ready` 之前只能排队；`closed`/`disposed` 后 `submitText` 返回 `'closed'` 并 emit `input(rejected)`；`force` 是唯一绕过 `canWrite` 的入口（盲写护栏）。后续任务 18/19 改 `onPhoneMessage`/`restoreAll` 时不得改动这三条不变式。
+
+31. **其余实现期实测结论（任务 7/12/13）。** ①hook-stop 看门狗 `BUDGET_MS = 1500`（绝对兜底），llhttp 在请求行解析阶段对非法方法字符直接回 `400`，因此测试构造的畸形请求要用 `X` 而不是空格，才能命中应用层看门狗而非解析层。②屏幕就绪判定用的是底部 30 行「草稿窗口」+ `lastPromptIndex` 向右移动，往下滚动的长输出不会误判为「回到输入框」。③`WSClient` 的 `onError` 目前只进 SDK 自己的 logger，不路由到应用日志；长连接错误排障需看 `logs/` 之外的 stdout，属已知观测缺口。④富文本 `content_v2` 的 markdown 子集有限，`post` 里不要塞表格/嵌套列表，已按纯文本降级处理。
+
+32. **真实 transcript 里 user 条目绝大多数是 tool_result（任务 17）。** 每调用一次工具，Claude Code 就写一条 `{type:'user', message:{content:[{type:'tool_result'}]}}`，紧跟 assistant 的 tool_use。`summarizeToolUse` 倒扫时若「见 user 就停」，第一个非 assistant 条目几乎必然是 tool_result，摘要恒为空——质量审查实测本机 6 个真实 jsonl 全部返回空串。已改为：content 全为 `tool_result` 块的 user 条目 `continue`，字符串或含 text 块的 user 条目才是真实轮次边界。测试夹具必须用「assistant tool_use ↔ user tool_result 交替 + 真实用户提示」的真实形状，否则改回错误实现也测不出来。
+
+33. **处理中卡片的生命周期与竞态（任务 17）。** ①Stop 的所有提前返回路径（空白输入、无回复且未打断）必须终结 `pendingCard`，否则卡片永远停在「处理中」，下一轮 turn-start 还会把 `pendingCard` 覆盖成新卡，旧卡再无机会定稿。②慢 `createCardEntity` 与 Stop 竞态：Stop 先到会先发回复卡，随后「处理中」卡才发出且永不终结。用 `record.turnSeq` 轮次 token 解决：turn-start 与 Stop 各递增一次；`startProcessingCard` 在 create 返回后校验 token，失配直接不发；`pendingCard` 在 `sendCardEntity` **之前**登记（登记与发卡之间的 `await` 是唯一交错点）。③`updateCardEntity` 失败仍会留下旧卡（已知、不阻断），warn 日志已带 `cardId`/`chatId` 便于排障。
+
+34. **`_drain` 必须是「等到队列稳定」的循环（任务 17）。** 直接暴露 `pendingWork` 是调用瞬间的 promise 快照：在 enqueue 之前 await 会立刻 resolve，测试假绿。已改为 `do { prev = pendingWork; await prev; } while (prev !== pendingWork)`。
+
+35. **任务 17 复审后的已知非阻塞项（不在本任务修，留给最终整体审查评估）。** ①`finalizePendingCard` 的 `updateCardEntity` 失败只记日志，不像主路径那样 `sendCard` 兜底重发——卡片会停在「处理中」且该段文字丢失；概率低（只发生在空白/无输出回合），修法是对齐主路径。②三个测试缺口：pendingCard 先登记后发送、发送失败 catch 清空 pending、drain 的 settle 语义，变异实验显示删掉这三点仍 44/44 绿，靠阅读而非测试守护。③`src/agent/tools.js` 顶部注释仍写「碰到 user 就停」，与新逻辑矛盾，属注释过期。④PTY 在无 Stop 的情况下退出（`exit` 到 `error`）时 `pendingCard` 残留，卡片会停在「处理中」；这是任务 17 之前就有的问题，可在任务 18 的 exit 分支顺手收尾。⑤重复 Stop（重连/重放）会重复发回复卡并多加一次 `turnSeq`，无幂等。⑥超过 20MB 的 transcript 静默跳过工具摘要，9 份真实文件中有 2 份命中。
+
+36. **任务 18 复审后的已知非阻塞项。** ①质量审查发现并已在本任务修复：`ptySession.kill()` 曾把共享的 `session.status` 置 `'closed'`，覆盖 `closeSession` 先置的 `'closing'`，导致主动关闭仍发「进程异常退出」卡并广播一次 error 状态；已删该行，并补「主动关闭不误报崩溃」测试（假 PTY 的 kill 同步 emit exit）。注意该 manager 级测试模拟的是修复后行为，若有人把该行加回 `ptySession.kill()`，这个测试不会拦（靠 ptySession 自身测试与代码评审守护）。②`revive()` 的 `spawn(record)` 与两处网络调用没有 try/catch，与 `createFromPhone`/`createFromPc` 的「启动失败」处理不一致；PTY 拉不起来时记录停在 `starting` 且用户收不到提示。③`closeSession` 的 `store.remove` 在 `notify`/`autoDisband` 两个 await 之后，若期间用户发「重来」复活同一记录，会被随后的 remove 删掉，留下孤儿 PTY；当前调用方（解散/移出/抽检）都不触发，接窗口关闭时要修。④第 35 条④（exit 时 `pendingCard` 残留）仍未处理。⑤`onCardAction` 的 `force-send` 对过期按钮会把字面「仍然发送」当普通消息提交（既有 `onPhoneMessage` 魔法串重载的延伸）。⑥`tick()` 串行 await 每群一次 `getChat`，会话多时单轮可能超过 30 秒与下一轮重叠（`store.all()` 快照语义安全，属性能项）。
+
+37. **任务 19 复审后的补充与已知非阻塞项。** ①实现期自查发现 `record.resuming` 在 `--resume` 成功后从未复位：恢复成功的会话再崩溃会被误判成 resume 失败，静默丢掉 `claudeSessionId` 并提示「会话记录不在了」。已在 `ready` 分支清 `resuming`，并补回归用例（删掉该行即 FAIL）。②规格审查发现规格自相矛盾：`onPhoneMessage` 的「已停」守卫（`!ps || ['error','closed','closing']`）排在 `interrupted` 恢复分支之前，真实 daemon 重启后内存 `sessions` 为空，`!ps` 恒真，普通消息永远走不到 `revive`；原用例因假 PTY 残留在 `sessions` 里而假绿。已把 interrupted 分支前置（条件 `record.status === 'interrupted' && !ps`），并把 5 个用例改成 `_sessions.clear()` 模拟真实重启。③质量审查另补三处：`retryWithoutResume` 改为先 `spawn` 再 `await sendText`（否则 await 窗口内用户消息会写进已退出的旧 PTY 而丢失，期间记录被删还会留下孤儿进程），并加 `store.get(record.id) !== record` 存活守卫；`restoreAll` 的 `store.remove`/`store.save` 包 try/catch（磁盘异常不再中断启动恢复，补了「落盘失败不中断」用例）；删掉 `retryWithoutResume(record, e)` 的无意义第二实参。④残余：`notifyCrash` 没有同款存活守卫（仅当排队后记录被删才可能误发崩溃卡）；`restoreAll` 假设内存 `sessions` 为空，热重载场景会静默拒绝，而 daemon 目前只在冷启动调用；`_sessions.clear()` 只是重启近似，更真实的 e2e 应新建 manager + 预置 store；`revive()` 里 `spawn` 之后的 `sendText` 仍未包 try/catch（与第 36 条②同源）。
+
+38. **任务 21 复审后收紧 codex 识别（偏离计划原文，已改）。** 计划给出的 `AGENT_LEAD`/`AGENT_VERB` 无词边界、VERB 不锚句首，且 VERB 分支 `.replace(/\s+/g,' ')` 会压掉 prompt 换行。质量审查实测三个反例：`'这个功能用 codex 实现过'` 被判为指定、`'codexwriter 是什么'`/`'codex-cli 怎么装'` 被判为指定、多行 prompt 的换行丢失。已改为：两个正则都在 `codex` 后加 `(?![A-Za-z0-9_-])`，`AGENT_VERB` 加 `^\s*` 锚定；VERB 分支只 `.trim()`。别名/路径分支剥前缀后正文本身以「用 codex」开头，原 11 条用例全绿。已知边界（可接受）：default 分支前导中文标点（`'，用 codex 写'`）不识别，属既有 SEP 处理范围外；`'用 codex-1号 写'` 因 lookahead 不识别。测试新增 4 条（句中提及、`codexwriter`/`codex-cli`、换行保留、`codex，` 防回归）；router 15、manager 57、全量 284。
+
+39. **任务 22 复审后的转义加固（必须修的注入缺陷）。** 质量审查发现新增的「画面推送卡」`screenOutputCard` 与「完整画面」`fullScreenCard` 直接用 `md('```\n' + truncate(text) + '\n```')` 拼代码块：终端输出里只要出现三个反引号就会提前闭合围栏，后续内容（例如 Codex 输出里的 `<at id=all></at>`）会被当作真卡片语法解析，等于把 @所有人 的按钮交给终端输出。`lead`（电脑端输入回显）同理未转义。已改为与既有 `screenCard` 一致的三层写法：`neutralizeFences(escapeText(truncate(...)))`（围栏内插 U+200B 打断、`<` → `&#60;`），`lead` 走 `md(escapeText(lead))`。另修两处：完整画面的 `lines` 参数用 `Math.floor` 取整（`'40.5'` 会令 `buf.getLine(40.5)` 取不到行），`pushScreenOutput` 的状态守卫补齐 `'interrupted'` 与完整画面分支一致——该守卫因有更早的分支拦截，属不可达状态，测试无法覆盖，靠阅读守护。新增 4 条真红用例（围栏闭合 ×3、`'40.5'`）+ 3 条回归守卫；cards 20、manager 64、全量 297。
+
+40. **任务 25 复审后的修正与已知非阻塞项（合并 `82f2ac8`，全量 313）。** ①规格审查发现「装配」用例的两条穿透断言是空转：`screenFactory: () => ({fallback:true})` 丢掉了实参，`queueFactory` 压根没断言；已改为在 `calls` 里记录 `screenArgs`/`queueArgs` 并断言 `{cols:120,rows:30}`、`wrapped.queueFactory === deps.queueFactory`、`calls.queueArgs` 为 `{limit:7}`，用例数不变（改后用 `--amend` 落成 `5c11a60`）。②质量审查列出但按计划范围暂不处理的项：async catch 回调里直接 `log.warn`，若日志 appendFileSync 抛错（磁盘满/权限）会成为未捕获拒绝并把 daemon 打死，建议移植 `src/ipc.js` 的 `reportHandlerError`/`safeWarn` 写法；`stop()` 的 `manager.shutdown()` 与 `ipc.close()` 之间无 `try/finally`，前者抛错则 IPC 永不关闭；停机中第二次 Ctrl+C 被一次性 handler 吞掉且无提示；`started` 在 await 之前就置真，start 失败后无法重试；stop 之后再 start 静默无操作；`probeRunning` 只看 `/health` 不校验是不是本项目的 daemon；端口/超时等数字参数未做范围校验。③覆盖缺口：sweep 定时器分支、未就绪时的 `!manager` 守卫、`probeRunning` 的失败路径、IPC `attach` 分支、`onHookStop` 接线、信号只处理一次，均无断言。
+
+41. **任务 28 复审后的三轮修正与已知非阻塞项（合并 `829bc38`，全量 332）。** ①**计划顺序缺陷**：`docs/acceptance.md` 由任务 26 创建（计划 6805/6996/7147 行），但任务 28 更早且要求改它。最小适配：本任务只建一个仅含第 12 条的桩文件；**任务 26 必须写第 1–11 条 + 验收结论、把 Plan A 分母改成 12，且不得重复第 12 条**。②规格审查：失败回执用例用 `assert.match(..., /不存在/)`，把文案硬编码成 `'不存在'` 仍全绿；已改 `assert.strictEqual(..., '别名「卡牌」不存在。')`（`--amend` → `0d21ebd`）。③质量审查：改名只写 projects.json，会话记录里的 `alias` 仍是旧值，`结束 新名` 与验收第 4 步都会断；改为 `formatSessions` 按 cwd 反查当前别名，结束用「当前别名 → id → cwd → 旧别名」多路匹配（`--amend` → `141bcbc`）。④第二轮：该顺序仍让过期 `session.alias` 优先——「卡牌」改成「卡牌2」后，另一个项目再改名占用「卡牌」，`结束 卡牌` 会按会话记录顺序**误关另一个群的 PTY**；已改为当前 projects 别名优先、命中后不再回退旧别名，并补真红用例（`--amend` → `f2854f5`）。⑤`renameAlias` 用 `aliases[k] = v` 重建时，新别名叫 `__proto__` 会走原型 setter：返回 `{ok:true, aliases:{}}` 且旧别名从磁盘消失；已改 `Object.defineProperty` 并补用例。⑥非阻塞项：面板 markdown 未转义（别名含三反引号会破列表，私聊仅主人可见）；点过改名按钮后，下一条无空格闲聊会被当成新别名（无 TTL/取消）；`doRename` 不 catch `writeJsonAtomic` 抛错，用户收不到任何回执；`ownerOpenId` 为空时面板全程静默且无日志；`onMessage`/`onCardAction` 之间无串行化；同一 cwd 的两个会话无法单独选中；两个别名指向同一 cwd 时反查只取第一个键；关闭回执打印的是记录里的旧别名；`renameAlias({ file: pathsApi.PROJECTS, ...args })` 的展开顺序可被 `args.file` 覆盖；导出的 `STATUS_TEXT`/`MAX_ALIAS_BUTTONS` 仅内部使用；别名超过 10 个静默截断；`loadProjects` 读取时仍会丢 own `__proto__` 键（既有、病理输入）。测试：control 14 / projects 7 / daemon 12 = 三文件 33，全量 332。
+
+42. **任务 26 的落地偏差与已知非阻塞项（合并 `0354353`，全量 339）。** ①`package.json` 的 `test` 脚本从 `node --test` 改成 `node --test "test/**/*.test.js"`：Node 24 的自动发现会把 `test/fixtures/**` 里的任意 `.js` 当测试跑，`fake-agent.js` 在永不关闭的 stdin 上 `readline` 会挂死整轮；现在用字面 glob（25 个测试文件命中，fixtures 排除）。②`test/e2e` 清理不用 `--test-force-exit`：挂住的根因是 node-pty 的 `ptySession.onExit` 置 `disposed` 后 `ps.kill()` 直接返回，ConPTY 的 `conout` Worker（MessagePort）永不释放；测试侧对原始 pty 调一次 `raw.kill()` 即可干净退出。全局 force-exit 会掩盖 339 个用例的句柄泄漏，已否决。**生产侧同一泄漏成立，另立任务 29 修**（`onExit` 里 `try { pty.kill() } catch {}`）。③`docs/acceptance.md` 由任务 26 一次写全 12 条；Plan A 分母按**实际可验**的 9 条计（第 3、4、5 条只有 🅑），不是任务 28 记录里说的 12——12 是清单条目数，9 是 Plan A 可判定的条数。④`npm run check-logs` 改为失败即失败：凭据文件损坏/解不开时退出码 2（此前会吞掉异常输出 OK），未配置凭据时打印「跳过…（此项不算通过）」退出 0；`walk` 跳过符号链接（盲区：指向仓库外的链接不扫）。⑤**setup 落盘 `state/projects.json` 默认别名**（`草稿`/`临时草稿` → `defaultCwd`）：计划 §7 第 6 条本来就写明「`projects.json` 由 `npm run setup` 写入默认值」，实现却只写配置与 Secret，导致验收第 7/10/12 条在干净环境必失败、手机端别名面板永远为空；现改为 setup 成功后在文件不存在时创建，先 `mkdirSync(defaultCwd)`（目录不存在时别名会话会被 manager 拒绝），临时文件 + rename 原子写，已存在不覆盖，失败只记一步 false 不影响 `ok`。⑥非阻塞项：e2e 退出时 stderr 有 node-pty `AttachConsole failed` 噪声（5 秒超时后才 fallback，不影响结果）；`walk` 读目录失败只报一行 `失败：无法读取 …`；验收第 9 条的 `--resume` 需要该会话此前完成过至少一轮 claude 对话（已写进清单前提）。测试：全量 332 → 339（e2e 2 + check-logs 1 + setup 4）。
+
+43. **任务 27 的落地偏差与三轮审查后的修正（合并 `e1af1a3`，全量 366）。** ①按「本任务不真装」的约束，`install` 只允许 `--dry-run` 与注入 fake `run` 的测试；验收文档 §9 写明真实安装必须等到最终长期目录 + 真实凭据之后。②期间曾意外真实注册过一次 `\FeishuBridge.Daemon`（实现者跑测试时误触），已 `schtasks /Delete` 删除并清理 `state/daemon-autostart.*`；此后每轮跑测试前后都检查无任务、无脚本文件。③`uninstall` 的失败语义：`/Delete` 报错不等于失败，先复查任务是否已消失；已消失才算成功并删脚本，仍存在（含 Access denied）则抛错并**保留**脚本，避免留下指向已删脚本的注册任务（每次登录都会报找不到脚本）。④嵌入 VBS/CMD 的路径必须可打印 ASCII 且不含 `%`：`wscript`/`cmd` 按 CP936 解码 UTF-8 脚本会把中文路径写坏，`%` 在双引号内仍会展开；`install` 在任何副作用前校验，不满足直接中文报错。**限制：工程与 Node 必须放纯英文路径。**⑤`whoami`/`schtasks` 一律走 `%SystemRoot%\System32` 绝对路径：Git Bash 的 PATH 会先命中 MSYS 版 `whoami`（不认 `/user`），`schtasks` 的 `/Query` 等参数被 MSYS 改写成盘符路径导致恒失败；子进程输出按 GBK 解码再拼错误信息。⑥`taskExists` 必须解析 CSV 第一字段并去掉前导 `\`：真实根任务行是 `"\FeishuBridge.Daemon","N/A","就绪"`，按裸名 `startsWith` 恒假；子目录任务 `"\Microsoft\Windows\..."` 不得误判，引号内逗号、大小写、尾部空白都要兼容。⑦验收文档里的 `schtasks` 命令改用 PowerShell 代码块执行，并写明「不存在时退出码非 0，提示系统找不到指定的文件」。⑧顺带修掉既有 e2e 时序竞争：`status === 'idle'` 后立即断言屏幕含 `FAKE_AGENT_READY` 偶发失败（本轮独立复现一次），改为 `waitFor(..., 5000)`；验证为 e2e 连跑 10 次 + 全量连跑 3 次全绿。⑨非阻塞项：XML 的 `<Settings>` 沿用 Windows 导出任务的超集（未真装，无法实测精简 schema）；`install` 成功后不校验任务实际可启动；`status` 只看任务是否注册，不区分 Enabled 与上次运行结果；`<IdleSettings.SubType>` 等 1.2 可选字段未提供。测试：autostart 27，全量 366。
+
+44. **任务 29 的落地与审查记录（合并 `53f69d0`，全量 368）。** ①根因核实（审查者用 grep 推翻了初版注释）：node-pty 1.1.0 全库无 `hasExited`；自然退出时 `windowsTerminal.js:97-100` 的 socket close 只 `emit('exit')` + `_close()`，从不调 `_agent.kill()`，而 `_conoutSocketWorker.dispose()` 只在 `WindowsPtyAgent.kill()` 内（`windowsPtyAgent.js:151`/158），于是 MessagePort 撑住事件循环。修法是在 `onExit` 里先 `const p = pty; pty = null;` 再 `p.kill()`。②重入：假 pty 的 `kill()` 会同步回调 `exitHandler`，此时 `pty` 已为 null，不会再递归；`queue.drain()` 对空数组幂等，`disposeScreen`/`emitExitOnce` 各有守卫，exit 事件恒 1 次。③回归测试两层：单测断言 `killCalls === 1`（变异后为 0 并转红）；`test/pty-leak.test.js` 用真实 ConPTY 子进程且不调 `process.exit()`，只能靠事件循环自然排空退出，变异后超时转红、修复后约 7 s 通过。④实测 ~7 s 而非计划预期的 1–3 s：其中约 5 s 是 node-pty `windowsPtyAgent.js:189-193` 未 unref 的 `setTimeout` 在等 `AttachConsole`（进程已退出会打 `AttachConsole failed`），与泄漏无关；超时因此从 20 s 放宽到 30 s。⑤已知副作用（审查者探针实测，本任务按边界未改）：手动 `kill()` 后真实 exit 仍会再进一次 `onExit`，导致 `killCalls === 2`；`dispose()` 幂等不会双重泄漏，但真实 node-pty 下会多 fork 一次 `conpty_console_list_agent` 并再排一个 5 s 定时器。后续若要消除，把 `kill()` 也改成先摘 `pty`。⑥`pty = null` 后 `writeItem` 无守卫，但 `submitText` 已按 `disposed/closed` 拦截、队列已 drain，现有路径不可达。测试：ptySession 41，pty-leak 1，全量 368。
+
+45. **全量交付前总审查的结论与任务 30 修复（合并 `0a55f2f`，全量 373）。** ①审查范围：相对 `main` 59 个文件、+10547 行；独立跑 `npm test` 368 全绿、e2e 2/2、21 个 `src` 模块均可加载、源码与测试无真实凭据、除受门控的 autostart 外无真实 `schtasks /Create`、无 `--test-force-exit`；另做 4 组变异实验全部转红。结论：需修复后交付（1 必修 + 2 建议）。②**必修（已修，`134970f`）**：`manager.createFromPhone` 先 `await api.sendCard` 再 `submitText`——连发两条时第二条抢先拿到 seq，且卡片发送失败会让函数 reject，首条提示词永远进不了 PTY，而 `bin/daemon.js:158` 对 `onPhoneMessage` 是 fire-and-forget（只 warn），于是会话白建。改为首条在**任何 await 之前**入队，`sendCard` 包 try/catch；补 2 个用例（deferred sendCard 下断言入队顺序 `['第一条','第二条']`、sendCard 拒绝时仍提交并 resolve），旧代码均真红。顺带核实「连发两条重复建会话」不可达：`onPhoneMessage` 到 `store.upsert` 全程同步。③**规格漂移（已修，`134970f`）**：规格第 414 行要求 `state/ipc.json` 的 ACL 只允许当前用户读，实现却明文写 token 不设权限。`restrictAcl` 从 `secrets.js` 导出，`startIpc` 写出后调用（可注入）；中文用户名下实测 `Get-Acl` 只剩 `<计算机名>\<用户名> Read, Synchronize`，PowerShell 重写被拒；删除仍可经目录继承，属已知窗口（见⑥）。④**复审又发现启动可挂死（已修，`e3719e0`）**：写 `ipc.json` 的 `writeFileSync` 在 ACL 的 try 之外，EACCES/EISDIR 会在 `server.listen` 回调里抛未捕获异常，`startIpc` 永不 resolve；新用例把 `ipcFile` 指向目录，旧代码 `timeout 25` 直接 exit=124 卡满。现在写盘与 ACL 同在一个 try，写失败记 `ipc.write_failed`、ACL 失败记 `ipc.acl_failed`，日志调用本身也防御（`log` 缺失或抛错都不影响启动）。`close()` 的 `unlinkSync` 同样加了 try/catch：路径是目录时 `unlinkSync` 抛 EPERM 会让关闭炸掉。`restrictAcl` 的 `icacls` 补 `timeout: 10000`，避免挂起。⑤非阻塞项（按边界未改，记此备查）：`loadConfig`/`secretStore.load` 的 `JSON.parse` 无 try/catch，`state/config.json` 损坏时只给裸解析错误、没有「重跑 `npm run setup`」提示（`store.js`/`projects.js` 都会降级，两者不一致）；`manager` 的 `log.warn` 未做防御，但生产路径恒有 logger（`bin/daemon.js:47` `createLogger`）；`ipc.json` 先写后设 ACL，理论上有极短窗口可读；`mkdirSync(stateDir)` 仍在 try 之外——state 目录建不出来时配置与 Secret 同样落不了盘，daemon 本就无法工作，故不额外兜底。⑥测试：ipc 18、manager 71，全量 368 → 373；合并后主分支独立复跑 373 全绿。
+
+
+---
+
+### 任务 29：修复 ConPTY conout Worker 句柄泄漏（生产侧）
+
+**背景（任务 26 实测结论，见 §7 第 42 条②）：** node-pty 1.1.0 在子进程**自然退出**后不会释放 ConPTY 的 `conout` Worker：`WindowsPtyAgent.kill()` 开头有 `hasExited` 守卫，`disposed`/`wasDisposed` 为真时直接返回，`_conoutSocketWorker.dispose()` 永远不执行。泄漏的是 Worker 的 `MessagePort`，它会一直把 Node 的事件循环撑住。任务 26 在 e2e 里用「测试结束时对原始 pty 再调一次 `kill()`」绕过去了，但**生产代码同样泄漏**：daemon 每关一个会话就漏一个 Worker，且 daemon 自身在 `manager.shutdown()` 后无法干净退出。本任务修生产侧，并补一个子进程级回归测试（单测的假 pty 看不到句柄）。
+
+**文件：**
+- 修改：`src/session/ptySession.js`（`onExit`）
+- 修改：`test/ptySession.test.js`（harness 记录 kill 次数 + 新增用例）
+- 创建：`test/fixtures/pty-leak-child.js`
+- 创建：`test/pty-leak.test.js`
+- 修改：`test/e2e.test.js`（只更新已过期的注释，`killRaw` 保留作双保险）
+
+---
+
+- [ ] **步骤 1：让 harness 记录 kill 次数，并写失败的单测**
+
+`test/ptySession.test.js` 的 `harness()` 里：
+
+```js
+  let killCalls = 0;
+  const pty = {
+    pid: 4242,
+    onData(fn) { dataHandler = fn; },
+    onExit(fn) { exitHandler = fn; },
+    write(s) { written.push(s); },
+    resize(c, r) { resized.push([c, r]); },
+    kill() { killCalls++; exitHandler({ exitCode: 0 }); },
+  };
+```
+
+返回对象里加 `get killCalls() { return killCalls; },`。新增用例：
+
+```js
+test('agent 自然退出后对原始 pty 调一次 kill（释放 conout Worker）', () => {
+  const h = harness();
+  h.ps.start();
+  h.ps._pollReady();
+  assert.strictEqual(h.ps.status, 'idle');
+  h.emitExit(0);
+  assert.strictEqual(h.ps.status, 'closed');
+  assert.strictEqual(h.killCalls, 1, '自然退出后必须补一次 pty.kill()，否则 conout Worker 泄漏');
+  assert.strictEqual(h.events.filter((e) => e.type === 'exit').length, 1, 'exit 事件不能重复');
+});
+```
+
+注意假 pty 的 `kill()` 会**同步**回调 `exitHandler`，所以生产代码必须能扛住 `onExit` 重入：再次进入时不能再 drain、不能再 emit exit。
+
+- [ ] **步骤 2：运行确认失败**
+
+运行：`node --test test/ptySession.test.js`
+预期：新用例 FAIL，`killCalls` 为 0（实际得到 `0`）。
+
+- [ ] **步骤 3：实现修复**
+
+`src/session/ptySession.js` 的 `onExit` 改为：
+
+```js
+  function onExit(info) {
+    clearReadyTimer();
+    status = 'closed';
+    session.status = 'closed';
+    disposed = true;
+    queue.drain();
+    // node-pty 在子进程自然退出后不会自己 dispose：WindowsPtyAgent.kill() 被
+    // hasExited 守卫短路，conout Worker 的 MessagePort 不释放，事件循环被撑住。
+    // 对原始 pty 再调一次 kill 才会走 dispose 路径；先把 pty 摘掉防止重入。
+    if (pty) {
+      const p = pty;
+      pty = null;
+      try { p.kill(); } catch { /* 已经退出 */ }
+    }
+    disposeScreen();
+    emitExitOnce(info && info.exitCode, info && info.signal);
+  }
+```
+
+- [ ] **步骤 4：运行确认通过**
+
+运行：`node --test test/ptySession.test.js`
+预期：全部 PASS（含新用例）。
+
+- [ ] **步骤 5：写子进程级回归测试（真句柄）**
+
+`test/fixtures/pty-leak-child.js`（注意：不要命名为 `*.test.js`，否则被 glob 收进测试轮）：
+
+```js
+// 子进程：开一个真实 ConPTY 会话，让 fake-agent 执行 /exit 自己退出。
+// 修复前 conout Worker 的 MessagePort 不释放，本进程跑完也不会退出；
+// 修复后 onExit 补的 pty.kill() 会 dispose Worker，事件循环自然空掉。
+const path = require('node:path');
+const pty = require('node-pty');
+const { createPtySession } = require('../../src/session/ptySession');
+const { createScreen } = require('../../src/screen');
+const { createQueue } = require('../../src/session/queue');
+
+const session = {
+  id: 'leak', chatId: 'oc_leak', agent: 'fake', cwd: process.cwd(),
+  status: 'idle', inputSeq: 0, lastInput: null,
+};
+
+const ps = createPtySession({
+  session,
+  launch: () => ({
+    file: process.execPath,
+    args: [path.join(__dirname, 'fake-agent.js')],
+    cwd: process.cwd(),
+  }),
+  ptyFactory: pty.spawn,
+  screenFactory: createScreen,
+  queueFactory: createQueue,
+  onEvent(e) {
+    if (e.type === 'ready') ps.submitText('/exit', 'phone');
+    if (e.type === 'exit') process.stdout.write('CHILD_CLOSED\n');
+  },
+});
+
+ps.start();
+// 不调 process.exit()：句柄都清干净的话，事件循环会自己结束。
+```
+
+`test/pty-leak.test.js`：
+
+```js
+const test = require('node:test');
+const assert = require('node:assert');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+const FIXTURE = path.join(__dirname, 'fixtures', 'pty-leak-child.js');
+const TIMEOUT_MS = 20000;
+
+test('真实 ConPTY 自然退出后子进程能自行结束（conout Worker 已释放）', async () => {
+  const child = spawn(process.execPath, [FIXTURE], { cwd: process.cwd() });
+  const result = await new Promise((resolve) => {
+    let out = '';
+    let err = '';
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, TIMEOUT_MS);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal, out, err, timedOut });
+    });
+  });
+  assert.strictEqual(result.timedOut, false,
+    `子进程 ${TIMEOUT_MS}ms 内没有退出，说明句柄仍在泄漏；stderr=${result.err}`);
+  assert.strictEqual(result.code, 0, `子进程退出码 ${result.code}；stderr=${result.err}`);
+  assert.ok(result.out.includes('CHILD_CLOSED'), `没看到 CHILD_CLOSED；stdout=${result.out}`);
+});
+```
+
+- [ ] **步骤 6：验证测试确实能抓住泄漏**
+
+先临时把步骤 3 的 `if (pty) { … }` 整块注释掉，运行：
+
+运行：`node --test test/pty-leak.test.js`
+预期：FAIL，20 秒超时（不是挂死，父进程会 `child.kill()` 收尾）。
+
+恢复步骤 3 的代码，再运行：
+运行：`node --test test/pty-leak.test.js`
+预期：PASS，约 1–3 秒。
+
+- [ ] **步骤 7：更新 e2e 里过期的注释**
+
+`test/e2e.test.js` 的 `makeSession` 注释现在说「`ps.kill()` 在 hasExited 后被 disposed 守卫短路，不会释放 conout worker 线程」——任务 29 修完后这句话不再成立，改成：
+
+```js
+  // 任务 29 起 onExit 会自己 pty.kill()；这里保留 raw.kill() 作双保险，
+  // 防止将来有人回退修复时整个测试轮挂死。
+```
+
+`killRaw` 逻辑不动。
+
+- [ ] **步骤 8：全量验证**
+
+```bash
+node --test test/ptySession.test.js
+node --test test/pty-leak.test.js
+npm test
+npm run test:e2e
+git status --short
+```
+
+预期：两个单文件全绿；`npm test` 在任务 27 合并后的基数上 +2（任务 27 若先合并约为 345）；e2e 2/2；工作区干净（临时文件都在系统 temp，无仓库残留）。
+
+- [ ] **步骤 9：Commit**
+
+```bash
+git add src/session/ptySession.js test/ptySession.test.js test/fixtures/pty-leak-child.js test/pty-leak.test.js test/e2e.test.js
+git commit -m "fix: 自然退出后释放 ConPTY conout Worker，补子进程级回归测试"
+```
+
+**边界：** 不改 `kill()`、`start()`、队列或屏幕逻辑；不引入 `--test-force-exit`；不动 `package.json`。Windows 之外的平台不在本项目范围内。
+
 ---
 
 ## 8. 计划完成状态
 
-- 任务数：28
+- 任务数：29（+ 任务 30：交付前总审查的修复任务，见 §7 第 45 条）
 - 覆盖规格章节：§1–§13 全部（详见 §5 对照表）
 - 未覆盖、明确留给 Plan B：Electron 多窗口、xterm.js 渲染、项目选择面板、recent 目录扫描、验收第 4、5 条
 - 凭据：本计划所有任务都不需要真实 App ID / Secret / 手机，全部用假件测试；真实凭据只在跑 `npm run setup` 和真机验收时用到

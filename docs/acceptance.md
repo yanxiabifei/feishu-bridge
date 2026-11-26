@@ -1,0 +1,158 @@
+# 飞书桥验收清单
+
+> 对应规格 §12。每条有 `- [ ]` 的地方验收通过后打勾，并在「实测」里写数据。
+> **🅐 = Plan A（守护进程 + 手机）就能验；🅑 = 必须等 Plan B 的 Electron 窗口。**
+> 所有耗时从「飞书显示已发送」开始计。
+
+## 前置检查
+
+| 项 | 命令 | 期望 |
+|---|---|---|
+| 单元测试 | `cd /d/feishu-bridge && npm test` | 全绿 |
+| 离线端到端 | `npm run test:e2e` | `pass 2 / fail 0` |
+| 凭据 | `npm start` | 日志出现 `daemon.started`，不出现「缺少飞书凭据」 |
+| 单实例 | 另开终端再 `npm start` | 日志出现 `daemon.already_running` 后退出（控制台无输出） |
+| Claude | `claude --version` | 正常输出 |
+| Codex | `codex --version` | 正常输出（第 10 条才需要） |
+
+> 备注：`npm run test:e2e` 退出时 stderr 可能打印 node-pty 的 `AttachConsole failed`，这是 ConPTY 清理时的固有 noise，不影响 `pass 2 / fail 0`。
+
+## 逐条验收
+
+### 1. 🅐🅑 手机拉群 @机器人「卡牌 你好」→ 收到回复
+
+1. 手机飞书建群 → 拉机器人进群 → `@机器人 卡牌 你好`。
+2. 🅐 记录：首条回复卡片出现的时间。
+3. 🅑 记录：Electron 窗口出现时间（≤3 秒）、窗口首屏 `❯` 出现时间（≤8 秒）。
+
+- [ ] 🅐 群里收到 claude 的回复（不是报错卡片）
+- [ ] 🅑 窗口 ≤3 秒弹出、首屏 ≤8 秒
+- 实测：🅐 ____ 秒 / 🅑 窗口 ____ 秒、首屏 ____ 秒
+
+### 2. 🅐🅑 连续两条不粘连
+
+1. 发「列出这个目录的文件」。
+2. 1 秒内再发「只列文件名」。
+3. 判定：第二条没被吞、没和第一条粘成一行；输出按顺序。
+
+- [ ] 🅐 两条都执行，顺序正确
+- [ ] 🅑 窗口里能看到两句输入和两段回答
+- 实测：____
+
+### 3. 🅑 电脑窗口敲字 → 手机收到
+
+1. 在电脑的会话窗口里输入「现在几点」并回车。
+2. 判定：群里先收到电脑侧输入（卡片里有 `🖥 你刚在电脑上问：现在几点` 这一行），随后收到回答。
+
+- [ ] 🅑 群里出现电脑侧输入和回答
+
+### 4. 🅑 多窗口并行
+
+1. 双击桌面图标 3 次。
+2. 三个窗口分别选不同目录，各发一个任务。
+3. 判定：3 个窗口 + 3 个群，互不串话。
+
+- [ ] 🅑 3 窗口 / 3 群 / 3 目录同时运行
+- 备注：Plan A 阶段可先用手机建 3 个群替代验证「多会话并行」
+
+### 5. 🅑 关窗口 → 该群收到「会话已结束」
+
+1. 关掉其中一个窗口。
+2. 判定：对应群收到结束卡片；另外两个窗口和群不受影响。
+
+- [ ] 🅑 只有被关的那个群收到结束通知
+
+### 6. 🅐🅑 解散群 → 会话自己收尾
+
+1. 在飞书里解散一个群。
+2. 🅐 判定：`state/sessions.json` 里该会话记录消失；任务管理器「详细信息」里按命令行核对，对应 `claude.exe`（命令行含该会话的 `state/hooks/<sessionId>.hook.json`）已经不存在。
+3. 🅑 判定：对应窗口自己关掉。
+
+- [ ] 🅐 记录被清理、PTY 已结束（进程消失）
+- [ ] 🅑 窗口自动关闭
+
+### 7. 🅐🅑 首句别名 / 默认目录
+
+1. 新群第一句：「草稿 帮我查一下 xxx」。
+2. 🅐 判定：`sessions.json` 里该会话 `cwd` = `D:/feishu-workspace`（或配置的 defaultCwd）、`alias` = `草稿`。
+3. 🅑 判定：窗口标题是「草稿 · …」。
+
+- [ ] 🅐 落默认目录，别名正确
+- [ ] 🅑 窗口标题正确
+
+> 备注：若已有 projects.json 但缺这两个别名，setup 不会自动补，请手动补上或删掉该文件后重跑 npm run setup；手动补时别名指向的目录必须真实存在，否则建会话会被拒。
+
+### 8. 🅐🅑 杀掉 claude → 异常提示 + 重来
+
+1. 任务管理器结束该 `claude.exe` 进程。
+2. 🅐 判定：群里收到异常卡片（含原因）。
+3. 🅑 判定：窗口出现「重来」按钮，点击后能继续对话。
+
+- [ ] 🅐 群里收到异常提示
+- [ ] 🅑 「重来」可用
+
+### 9. 🅐 重启电脑 → 自动恢复
+
+1. **先在最终长期目录**执行 `npm start`，确认 daemon 能起、日志没有「缺少飞书凭据」。确认无误后再装开机自启（只需一次）：`npm run autostart -- install`。
+   - 前提：工程与 Node 的安装路径必须**纯 ASCII、不含 `%`**（含中文等非 ASCII 字符时 install 会直接拒绝）。移动工程目录或更换 Node 路径后需要重新 install（先 `uninstall` 再 `install`）。
+   - 前提：已跑过 `npm run setup`、飞书凭据已填；装完 `npm run autostart -- status` 应显示已安装。
+   - 查状态：`npm run autostart -- status`
+   - 卸载：`npm run autostart -- uninstall`
+   - 卸载后核对：`npm run autostart -- status` 应显示未安装；再用 PowerShell 确认任务已不存在（Git Bash 会把 `schtasks /Query` 的 `/Query` 改写成路径，退出码也不可靠）：
+     ```powershell
+     powershell -NoProfile -Command "schtasks /Query /TN FeishuBridge.Daemon"
+     ```
+     应返回非 0 退出码，并提示「错误: 系统找不到指定的文件。」（即找不到该任务）。
+2. 重启电脑，登录后等 **30–60 秒**。旧群会收到「电脑重启了，回一条消息我就接上。」。
+   - 排障入口：`logs/daemon.log` 看 daemon 是否启动/报错；任务状态用 PowerShell 查：
+     ```powershell
+     powershell -NoProfile -Command "schtasks /Query /TN FeishuBridge.Daemon /V /FO LIST"
+     ```
+3. 往旧群发一句话。
+4. 判定：daemon 在重启后无需手动 `npm start` 自动起来；群里先收到「重新开起来了，接着上次的对话。」，随后这句话被执行且能接着之前的上下文。
+   要确认它是按目标会话续接的：先从 `state/sessions.json` 找到该群对应会话的 `claudeSessionId`（按群名/别名找到会话对象，读取其中的 `claudeSessionId` 字段；也可用 `Select-String -Path state\sessions.json -Pattern 'claudeSessionId'` 辅助查看），再用 PowerShell 按这个 id 过滤进程，**不要**用宽泛的 `--resume`：
+   ```powershell
+   Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '<那个 claudeSessionId>' } | Select-Object Name, ProcessId, CommandLine
+   ```
+
+> 前提：该会话在重启前已完成至少一轮 claude 对话（`state/sessions.json` 中该会话有 `claudeSessionId`）；否则恢复提示是「重新开起来了。」，命令行不带 `--resume`，本项按前半段判定。
+
+- [ ] 🅐 daemon 自启、旧群能接上（收到重启提示 → 恢复提示 → 能继续对话）
+- 实测：重启后 ____ 秒可用
+
+### 10. 🅐🅑 Codex 全链路
+
+1. 新群第一句：「临时草稿 用 codex 写个快排」。
+2. 🅐 判定：群里持续收到 codex 的终端画面文本。
+3. 🅑 判定：窗口里是 codex TUI。
+
+- [ ] 🅐 codex 正常启动并向群里输出
+- [ ] 🅑 窗口显示 codex TUI
+
+### 11. 🅐 日志无机密
+
+```bash
+cd /d/feishu-bridge
+npm run check:logs
+```
+
+- [ ] 🅐 输出 `OK：扫描 … 个日志文件，未发现机密`
+- 备注：已配置凭据时才输出 `OK：…`；若没有任何可用凭据，脚本输出 `跳过：未配置凭据，无法校验 App Secret（此项不算通过）`，此时本项**不算通过**，先跑 `npm run setup` 再验。
+- 备注：凭据文件损坏/解不开时，脚本以退出码 2 报错（`无法读取凭据，无法校验 App Secret：…`），同样不算通过。
+- 备注：本项目不接 pushplus，该项只查 App Secret 与 `ANTHROPIC_AUTH_TOKEN`。
+
+### 12. 🅐 私聊总控面板
+
+1. 飞书里点机器人头像进私聊，发「列表」→ 收到总控面板卡片：上面是会话列表，下面一行行别名按钮。
+2. 点某个别名按钮 → 回「把「XX」改成什么？」；回复一个新名字 → 回「已把「XX」改成「YY」」。
+3. 到项目群发「YY 帮我看看这个文件」→ 用的还是原来那个目录（说明改名生效）。
+4. 私聊发「结束 YY」→ 该会话被关掉，群里收到「会话已结束」。
+5. 私聊发「随便说点什么」→ 只回帮助文字，**不会**新建会话。
+
+- [ ] 🅐 面板能列会话、能改名、能关会话、闲聊不建会话
+
+## 验收结论
+
+- Plan A 覆盖第 1、2、6、7、8、9、10、11、12 条，共 9 条；通过条数：____ / 9（🅐 部分）
+- Plan B 覆盖第 1–8、10 条，共 9 条；通过条数：____ / 9（🅑 部分）
+- 遗留问题：____
