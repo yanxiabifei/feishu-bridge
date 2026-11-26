@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { WebSocketServer } = require('ws');
+const { restrictAcl } = require('./secrets');
 
 // handler 名白名单：日志 event/字段只用固定值，绝不拼接动态内容。
 const HANDLER_NAMES = new Set(['onHookStop', 'onClientOpen', 'onClientMessage']);
@@ -19,6 +20,23 @@ function reportHandlerError(log, name, err) {
     }
     if (log && typeof log.warn === 'function') {
       log.warn('ipc.handler_error', { handler, error: message });
+    }
+  } catch {
+    /* 日志失败不影响 daemon */
+  }
+}
+
+// ipc.json 的写盘 / ACL 失败只记 warn：daemon 启动不能因此挂起或抛未捕获异常。
+function warnIpcError(log, event, err) {
+  try {
+    let message;
+    try {
+      message = (err && err.message) || String(err);
+    } catch {
+      message = 'unknown error';
+    }
+    if (log && typeof log.warn === 'function') {
+      log.warn(event, { error: message });
     }
   } catch {
     /* 日志失败不影响 daemon */
@@ -47,7 +65,7 @@ function safeInvoke(log, name, fn) {
   });
 }
 
-function startIpc({ port = 0, token, handlers = {}, log, ipcFile }) {
+function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrictAcl }) {
   const clients = new Set();
 
   const server = http.createServer((req, res) => {
@@ -110,9 +128,19 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile }) {
       const actualPort = server.address().port;
       if (ipcFile) {
         fs.mkdirSync(path.dirname(ipcFile), { recursive: true });
-        fs.writeFileSync(ipcFile, JSON.stringify({
-          port: actualPort, token, pid: process.pid, startedAt: new Date().toISOString(),
-        }, null, 2));
+        try {
+          fs.writeFileSync(ipcFile, JSON.stringify({
+            port: actualPort, token, pid: process.pid, startedAt: new Date().toISOString(),
+          }, null, 2));
+          try {
+            acl(ipcFile);
+          } catch (err) {
+            // ACL 失败不能拖垮 daemon（比如未登录的 unattended 启动）
+            warnIpcError(log, 'ipc.acl_failed', err);
+          }
+        } catch (err) {
+          warnIpcError(log, 'ipc.write_failed', err);
+        }
       }
       const send = (ws, obj) => {
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
@@ -130,6 +158,8 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile }) {
             server.close(() => {
               try {
                 if (ipcFile && fs.existsSync(ipcFile)) fs.unlinkSync(ipcFile);
+              } catch {
+                // 清理失败（文件被占用 / 路径是目录）不影响关闭
               } finally {
                 done();
               }

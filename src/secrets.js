@@ -22,6 +22,7 @@ function runPowerShell(script, inputB64) {
 function restrictAcl(file) {
   execFileSync('icacls', [file, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:R`], {
     windowsHide: true,
+    timeout: 10000,
   });
 }
 
@@ -50,4 +51,6 @@ function createSecretStore({ file, runner = runPowerShell, acl = restrictAcl, lo
   };
 }
 
-module.exports = { createSecretStore, runPowerShell, PS_PROTECT, PS_UNPROTECT };
+module.exports = {
+  createSecretStore, runPowerShell, restrictAcl, PS_PROTECT, PS_UNPROTECT,
+};

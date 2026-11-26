@@ -150,6 +150,38 @@ test('createFromPhone：只发别名时不提交空提示词', async () => {
   assert.deepStrictEqual(spawned[0].submitted, []);
 });
 
+test('createFromPhone：已开工卡片发送失败时仍提交首条并 resolve', async () => {
+  const log = fakeLog();
+  const { manager, spawned } = setup({
+    log,
+    apiOverrides: { sendCard: async () => { throw new Error('飞书抖了一下'); } },
+  });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 加个技能' });
+
+  assert.ok(rec, '卡片发送失败不应让 createFromPhone reject');
+  assert.deepStrictEqual(spawned[0].submitted, [{ text: '加个技能', origin: 'phone' }]);
+  assert.ok(log.warns.some(([msg, meta]) => msg === '已开工卡片发送失败'
+    && meta.sessionId === rec.id
+    && meta.message === '飞书抖了一下'));
+});
+
+test('createFromPhone：首条提示词先入队再发卡片，连发两条不乱序', async () => {
+  let releaseCard;
+  const cardGate = new Promise((resolve) => { releaseCard = resolve; });
+  const { manager, spawned } = setup({ apiOverrides: { sendCard: () => cardGate } });
+
+  const p = manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 第一条' });
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '第二条', senderOpenId: 'ou_me' });
+  releaseCard();
+  await p;
+
+  assert.deepStrictEqual(
+    spawned[0].submitted.map((s) => s.text),
+    ['第一条', '第二条'],
+    '首条提示词必须先于第二条入队',
+  );
+});
+
 test('createFromPhone：盘符路径不存在 → 回错误卡片，不建会话', async () => {
   const { manager, store, calls } = setup({
     getProjects: () => ({ aliases: {}, default: 'D:/w' }),

@@ -122,7 +122,7 @@ test('WebSocket：token 错误被断开，正确可收发与广播', async (t) =
 test('写了 ipc.json，close 后删除', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-ipc-'));
   const ipcFile = path.join(dir, 'ipc.json');
-  const ipc = await startIpc({ port: 0, token: 'tok-1', log, ipcFile, handlers: {} });
+  const ipc = await startIpc({ port: 0, token: 'tok-1', log, ipcFile, handlers: {}, acl: () => {} });
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   try {
     const doc = JSON.parse(fs.readFileSync(ipcFile, 'utf8'));
@@ -133,6 +133,79 @@ test('写了 ipc.json，close 后删除', async (t) => {
   } catch (err) {
     await ipc.close(); // 仅失败路径兜底，close 幂等
     throw err;
+  }
+});
+
+test('ipc.json 写好后用其绝对路径限制 ACL', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-ipc-acl-'));
+  const ipcFile = path.join(dir, 'ipc.json');
+  const aclCalls = [];
+  const ipc = await startIpc({
+    port: 0,
+    token: 'tok-1',
+    log,
+    ipcFile,
+    handlers: {},
+    acl: (file) => { aclCalls.push(file); },
+  });
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  try {
+    assert.deepStrictEqual(aclCalls, [path.resolve(ipcFile)]);
+    assert.strictEqual(path.isAbsolute(aclCalls[0]), true);
+  } finally {
+    await ipc.close();
+  }
+});
+
+test('ACL 失败只记 warn，ipc.json 仍写出且 daemon 正常启动', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-ipc-acl-fail-'));
+  const ipcFile = path.join(dir, 'ipc.json');
+  const lg = makeLog();
+  const ipc = await startIpc({
+    port: 0,
+    token: 'tok-1',
+    log: lg,
+    ipcFile,
+    handlers: {},
+    acl: () => { throw new Error('icacls 不可用'); },
+  });
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  try {
+    assert.ok(ipc, 'ACL 失败不应让 startIpc reject');
+    const doc = JSON.parse(fs.readFileSync(ipcFile, 'utf8'));
+    assert.strictEqual(doc.token, 'tok-1');
+    const warn = lg.warns.find((w) => w.event === 'ipc.acl_failed');
+    assert.ok(warn, '未记录 ipc.acl_failed');
+    assert.ok(String(warn.fields.error).includes('icacls 不可用'));
+    const res = await fetch(`http://127.0.0.1:${ipc.port}/health`);
+    assert.strictEqual(res.status, 200);
+  } finally {
+    await ipc.close();
+  }
+});
+
+test('ipc.json 写入失败只记 warn，startIpc 仍 resolve 且可关闭', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-ipc-write-fail-'));
+  const ipcFile = path.join(dir, 'ipc.json');
+  fs.mkdirSync(ipcFile);   // 路径是目录 → writeFileSync 抛错
+  const lg = makeLog();
+  const ipc = await startIpc({
+    port: 0,
+    token: 'tok-1',
+    log: lg,
+    ipcFile,
+    handlers: {},
+    acl: () => {},
+  });
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  try {
+    assert.ok(ipc, '写入失败不应让 startIpc 挂起');
+    assert.strictEqual(fs.statSync(ipcFile).isDirectory(), true);
+    const warn = lg.warns.find((w) => w.event === 'ipc.write_failed');
+    assert.ok(warn, '未记录 ipc.write_failed');
+    assert.ok(String(warn.fields.error).length > 0);
+  } finally {
+    await ipc.close();
   }
 });
 
