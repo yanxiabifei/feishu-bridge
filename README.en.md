@@ -1,15 +1,33 @@
 # feishu-bridge
 
-**A two-way bridge between a Feishu/Lark chat on your phone and Claude Code / Codex running on your PC.**
-
-Send a message in a Feishu group from your phone; a real terminal session starts on your computer, does the work, and posts the answer back to the group.
-
-No public IP, no tunneling, no third-party relay — it rides Feishu's long-connection API.
+**One session, one terminal screen — shared between a Feishu/Lark group on your phone and Claude Code / Codex on your PC.** Not two AIs talking to each other.
 
 [中文文档](README.md) · [MIT](LICENSE) · [Contributing](CONTRIBUTING.md) · Windows 10/11 · Node.js ≥ 22
 
 [![test](https://github.com/yanxiabifei/feishu-bridge/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/yanxiabifei/feishu-bridge/actions/workflows/test.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> No public IP, no tunneling, no third-party relay — it rides Feishu's long-connection API.
+
+## What it is
+
+A real terminal runs on your PC. The daemon owns the PTY, so your phone sees the actual output of that process; send a message in the group and it works inside that same session, then posts the result back.
+
+## What you can do
+
+- **Start from your phone**: create a group, add the bot, `@bot <alias> <task>`, and a new session starts on the PC.
+- **See the same screen**: the “current screen” card is the terminal itself, not a summary.
+- **Run projects in parallel**: one group per project, no cross-talk.
+- **DM control panel**: `列表` to list sessions, `结束 <alias>` to close, `改名 <old> <new>` to rename.
+- **In-place reply cards**: “working” first, updated with the answer on the same card.
+
+## Why this one
+
+Most bridges turn the conversation into Feishu cards: you see words, not the terminal. Here the daemon owns the PTY, so the phone receives the actual byte stream from the terminal process — no relaying, no summarising.
+
+> It does **not** attach to a `claude` you already started in a console; it only manages sessions it started. The desktop mirror window (Plan B) is not built yet — the IPC layer is ready, the client is not.
+>
+> Single-instance daemon; App Secret encrypted with Windows DPAPI.
 
 ## Is this for you?
 
@@ -17,7 +35,9 @@ No public IP, no tunneling, no third-party relay — it rides Feishu's long-conn
 
 **No** if you want a desktop mirror window (not implemented), use macOS/Linux (untested), or are uncomfortable with "one chat message → arbitrary command execution on my machine".
 
-## Quick start
+## How to use
+
+Just hand it to an AI 🤣～
 
 1. Create an **enterprise self-built app** on the [Feishu Open Platform](https://open.feishu.cn/app), enable the bot, and grant:
 
