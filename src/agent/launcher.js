@@ -38,7 +38,9 @@ function ensureTrusted({ claudeJsonPath, cwd }) {
 function writeHookFile({ hooksDir, sessionId, hookScript }) {
   fs.mkdirSync(hooksDir, { recursive: true });
   const file = path.join(hooksDir, `${sessionId}.hook.json`);
-  const command = `"${process.execPath}" "${hookScript}" --session ${sessionId}`;
+  // Windows 上 Claude Code 用 PowerShell 执行 hook 命令；开头带引号的路径必须用 `&` 调用，
+  // 否则 PowerShell 报 ParserError，hook 永远不会触发。
+  const command = `& "${process.execPath}" "${hookScript}" --session ${sessionId}`;
   const doc = { hooks: { Stop: [{ hooks: [{ type: 'command', command, timeout: 10 }] }] } };
   fs.writeFileSync(file, JSON.stringify(doc, null, 2));
   return file;

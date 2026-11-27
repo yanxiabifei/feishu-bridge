@@ -94,6 +94,21 @@ test('writeHookFile 生成 Stop 命令并带上 --session', (t) => {
   assert.ok(h.command.includes('--session s1'));
 });
 
+// Claude Code 在 Windows 上是用 PowerShell 跑 hook 命令的。`"a.exe" "b.js"` 这种开头带引号的
+// 写法会被 PowerShell 当成表达式 + 意外标记直接报 ParserError，hook 一次都跑不起来；
+// 必须用调用运算符 `&` 开头。
+test('writeHookFile 的命令以 PowerShell 调用运算符 & 开头', (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = writeHookFile({
+    hooksDir: dir,
+    sessionId: 's1',
+    hookScript: 'D:\\feishu-bridge\\bin\\hook-stop.js',
+  });
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.match(doc.hooks.Stop[0].hooks[0].command, /^& "/);
+});
+
 test('prepareClaude：无 claudeSessionId 不带 --resume，有则带', (t) => {
   const dir = tmpDir();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
