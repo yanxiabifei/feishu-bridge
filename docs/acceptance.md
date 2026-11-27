@@ -65,7 +65,7 @@
 ### 6. 🅐🅑 解散群 → 会话自己收尾
 
 1. 在飞书里解散一个群。
-2. 🅐 判定：`state/sessions.json` 里该会话记录消失；任务管理器「详细信息」里按命令行核对，对应 `claude.exe`（命令行含该会话的 `state/hooks/<sessionId>.hook.json`）已经不存在。
+2. 🅐 判定：解散后 5 秒内开始收尾（长连接正常时通常 1 秒内）；`state/sessions.json` 里该会话记录消失；任务管理器「详细信息」里按命令行核对，对应 `claude.exe`（命令行含该会话的 `state/hooks/<sessionId>.hook.json`）已经不存在。
 3. 🅑 判定：对应窗口自己关掉。
 
 - [ ] 🅐 记录被清理、PTY 已结束（进程消失）

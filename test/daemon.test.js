@@ -328,6 +328,54 @@ test('start / stop：先恢复会话再连飞书；退出时先断连再收尾',
   assert.deepStrictEqual(calls.order, ['restoreAll', 'wsStart', 'wsClosed', 'shutdown', 'ipcClosed']);
 });
 
+test('巡检节奏：长连接正常 30 秒一查，断线降到 5 秒，恢复后放慢回去', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = makeDeps({
+    loadConfigFn: () => ({ ...CONFIG, sweepIntervalMs: 30000, sweepDegradedIntervalMs: 5000 }),
+  });
+  h.ws.status = () => ({ state: 'connected' });
+  const daemon = await createDaemon({ deps: h.deps });
+  await daemon.start();
+
+  const ticks = () => h.calls.order.filter((x) => x === 'tick').length;
+  const flush = async () => { for (let i = 0; i < 3; i += 1) await new Promise((r) => setImmediate(r)); };
+
+  t.mock.timers.tick(29999);
+  await flush();
+  assert.strictEqual(ticks(), 0);
+
+  t.mock.timers.tick(1);
+  await flush();
+  assert.strictEqual(ticks(), 1);
+
+  // 断线：延时在每轮巡检结束后重新算，所以定时器断线前已排好的这一轮仍等满 30 秒
+  h.ws.status = () => ({ state: 'reconnecting' });
+  t.mock.timers.tick(30000);
+  await flush();
+  assert.strictEqual(ticks(), 2);
+
+  t.mock.timers.tick(4999);
+  await flush();
+  assert.strictEqual(ticks(), 2);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.strictEqual(ticks(), 3);
+
+  // 恢复连接：这一轮按断线时的 5 秒排的，巡检结束后改回 30 秒
+  h.ws.status = () => ({ state: 'connected' });
+  t.mock.timers.tick(5000);
+  await flush();
+  assert.strictEqual(ticks(), 4);
+  t.mock.timers.tick(29999);
+  await flush();
+  assert.strictEqual(ticks(), 4);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.strictEqual(ticks(), 5);
+
+  await daemon.stop();
+});
+
 test('main：已有实例在跑就直接退出，不再装配', async () => {
   const h = makeDeps({
     fsApi: fakeFs({ ipcExists: true, content: JSON.stringify({ port: 51000, pid: 999 }) }),

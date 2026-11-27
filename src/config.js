@@ -21,6 +21,7 @@ const DEFAULTS = {
   intakeTimeoutMs: 20000,
   inFlightTimeoutMs: 900000,
   sweepIntervalMs: 30000,
+  sweepDegradedIntervalMs: 5000,
   ipcPort: 47831,
 };
 

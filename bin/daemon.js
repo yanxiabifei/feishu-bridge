@@ -22,6 +22,7 @@ const { startIpc } = require('../src/ipc');
 
 const DEFAULT_PORT = 47831;
 const DEFAULT_SWEEP_MS = 30000;
+const DEFAULT_DEGRADED_SWEEP_MS = 5000;
 
 const errText = (err) => String((err && err.message) || err);
 
@@ -204,25 +205,53 @@ async function createDaemon({ deps = {} } = {}) {
   });
 
   let timer = null;
-  let started = false;
+  let alive = false;
+
+  // 长连接正常时解散事件即时到达，巡检只是「事件丢了」的保险，30 秒一次就够；
+  // 断线/重连时事件收不到，巡检是唯一手段，降到 5 秒。
+  // 延时在每轮巡检结束后重新算，所以断线后最多再等一轮才提速。
+  function sweepDelay() {
+    const sweepMs = config.sweepIntervalMs === undefined ? DEFAULT_SWEEP_MS : config.sweepIntervalMs;
+    const degradedMs = config.sweepDegradedIntervalMs === undefined
+      ? DEFAULT_DEGRADED_SWEEP_MS
+      : config.sweepDegradedIntervalMs;
+    let state = null;
+    try {
+      const s = typeof ws.status === 'function' ? ws.status() : null;
+      state = s && s.state;
+    } catch (err) {
+      log.warn('读取长连接状态失败', { message: errText(err) });
+    }
+    return state && state !== 'connected' && degradedMs > 0 ? Math.min(degradedMs, sweepMs) : sweepMs;
+  }
+
+  // 上一轮跑完再排下一轮：断网时 tick() 卡住也不会堆出重叠的巡检
+  function scheduleSweep() {
+    timer = setTimeout(async () => {
+      timer = null;
+      try {
+        await manager.tick();
+      } catch (err) {
+        log.warn('巡检失败', { message: errText(err) });
+      }
+      if (alive) scheduleSweep();
+    }, sweepDelay());
+    if (timer.unref) timer.unref();
+  }
 
   async function start() {
-    if (started) return;
-    started = true;
+    if (alive) return;
+    alive = true;
     await manager.restoreAll();
     await ws.start();
     const sweepMs = config.sweepIntervalMs === undefined ? DEFAULT_SWEEP_MS : config.sweepIntervalMs;
-    if (sweepMs > 0) {
-      timer = setInterval(() => {
-        manager.tick().catch((err) => log.warn('巡检失败', { message: errText(err) }));
-      }, sweepMs);
-      if (timer.unref) timer.unref();
-    }
+    if (sweepMs > 0) scheduleSweep();
     log.info('daemon.started', { port: ipc.port, pid: process.pid });
   }
 
   async function stop() {
-    if (timer) { clearInterval(timer); timer = null; }
+    alive = false;
+    if (timer) { clearTimeout(timer); timer = null; }
     try {
       await ws.close();
     } catch (err) {
