@@ -2,9 +2,10 @@
 
 **飞书双向 AI 终端桥** —— 手机飞书群里说一句话，电脑上的 Claude Code / Codex 真的开个终端干活，答完把结果发回群里。
 
-[English](README.en.md) · [MIT](LICENSE) · Windows 10/11 · Node.js ≥ 20
+[English](README.en.md) · [MIT](LICENSE) · [参与贡献](CONTRIBUTING.md) · Windows 10/11 · Node.js ≥ 22
 
 [![test](https://github.com/yanxiabifei/feishu-bridge/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/yanxiabifei/feishu-bridge/actions/workflows/test.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > 不用公网 IP，不用内网穿透，不走任何境外服务器 —— 只靠飞书开放平台的长连接。
 
@@ -18,7 +19,7 @@
 
 ## 三步跑起来
 
-需要 Node.js ≥ 20。
+需要 Node.js ≥ 22。
 
 1. 在[飞书开放平台](https://open.feishu.cn/app)建一个**企业自建应用**，开启机器人能力，配好：
 
@@ -62,9 +63,17 @@
 
 工程细节都在 `docs/`，不需要为了用它而读：
 
+- [`docs/faq.md`](docs/faq.md) —— 常见问题：配置失败、没反应、日志在哪
 - [`docs/architecture.md`](docs/architecture.md) —— 进程模型、ConPTY 与屏幕状态机、配置项、目录结构、开发与测试
 - [`docs/acceptance.md`](docs/acceptance.md) —— 验收清单
 - [`docs/superpowers/specs/`](docs/superpowers/specs/) · [`docs/superpowers/plans/`](docs/superpowers/plans/) —— 设计规格与实现计划
+
+## 参与贡献
+
+- 用不起来？先看 [`docs/faq.md`](docs/faq.md)；确实是 bug 就按模板开 issue。
+- 想改代码？读 [CONTRIBUTING.md](CONTRIBUTING.md)，本地 `npm test` 全绿再开 PR。一个 PR 做一件事。
+- 安全问题不要公开提，按 [SECURITY.md](SECURITY.md) 私密报告。
+- 接下来可能做什么，写在 [ROADMAP.md](ROADMAP.md)。
 
 ## 许可
 

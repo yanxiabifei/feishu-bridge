@@ -6,9 +6,10 @@ Send a message in a Feishu group from your phone; a real terminal session starts
 
 No public IP, no tunneling, no third-party relay — it rides Feishu's long-connection API.
 
-[中文文档](README.md) · [MIT](LICENSE) · Windows 10/11 · Node.js ≥ 20
+[中文文档](README.md) · [MIT](LICENSE) · [Contributing](CONTRIBUTING.md) · Windows 10/11 · Node.js ≥ 22
 
 [![test](https://github.com/yanxiabifei/feishu-bridge/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/yanxiabifei/feishu-bridge/actions/workflows/test.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Is this for you?
 
@@ -47,8 +48,16 @@ No public IP, no tunneling, no third-party relay — it rides Feishu's long-conn
 
 Engineering details live in [`docs/`](docs/) (Chinese):
 
+- [`docs/faq.md`](docs/faq.md) — common failures, no response, where the logs are (Chinese)
 - [`docs/architecture.md`](docs/architecture.md) — process model, ConPTY + screen state machine, config, layout, tests
 - [`docs/acceptance.md`](docs/acceptance.md) — acceptance checklist
+
+## Contributing
+
+- Stuck? Read [`docs/faq.md`](docs/faq.md) first, then open an issue using the template.
+- Code changes: read [CONTRIBUTING.md](CONTRIBUTING.md), make sure `npm test` passes locally, one PR per thing.
+- Security issues: report privately, see [SECURITY.md](SECURITY.md).
+- What's planned: [ROADMAP.md](ROADMAP.md).
 
 ## License
 

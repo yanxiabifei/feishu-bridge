@@ -1,0 +1,77 @@
+name: Bug 报告
+description: 有东西没按预期工作
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。贴日志之前请先读一遍，删掉 App ID、目录名、命令内容等私人信息。
+        如果是**安全问题**，请不要在这里发，见 [SECURITY.md](https://github.com/yanxiabifei/feishu-bridge/blob/main/SECURITY.md)。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 一句话说清楚现象。比如「群里 @机器人 后卡片一直显示处理中，没有回复」。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 你期望发生什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 在群里发 `@机器人 卡牌 你好`
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志片段（脱敏后）
+      description: 在 `logs/` 下，或控制台输出。请先运行 `npm run check:logs`。
+      render: text
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows 版本
+      placeholder: Windows 11 24H2 / Windows 10 22H2
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node.js 版本
+      description: 运行 `node -v`
+      placeholder: v24.17.0
+    validations:
+      required: true
+
+  - type: input
+    id: agent
+    attributes:
+      label: Claude Code / Codex 版本
+      description: 运行 `claude --version` 或 `codex --version`
+      placeholder: 哪个 agent、什么版本
+
+  - type: dropdown
+    id: installed
+    attributes:
+      label: 飞书应用是自建应用吗
+      options:
+        - 是，按 README 配的
+        - 是，但配置可能和 README 不一样
+        - 不确定
+    validations:
+      required: true

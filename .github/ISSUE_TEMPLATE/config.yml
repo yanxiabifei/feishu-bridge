@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全问题
+    url: https://github.com/yanxiabifei/feishu-bridge/security/advisories/new
+    about: 请私下报告，不要开公开 issue。
+  - name: 使用问题 / 配置失败
+    url: https://github.com/yanxiabifei/feishu-bridge/blob/main/docs/faq.md
+    about: 常见配置失败、没有回复、日志在哪，先看这里。
