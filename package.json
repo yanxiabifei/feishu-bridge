@@ -1,8 +1,23 @@
 {
   "name": "feishu-bridge",
   "version": "0.1.0",
-  "private": true,
   "description": "飞书双向 AI 终端桥：手机与本地 Claude Code / Codex 会话双向同步",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yanxiabifei/feishu-bridge.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "feishu",
+    "lark",
+    "claude-code",
+    "codex",
+    "conpty",
+    "remote-terminal"
+  ],
   "main": "bin/daemon.js",
   "scripts": {
     "start": "node bin/daemon.js",
