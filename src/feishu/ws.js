@@ -52,6 +52,15 @@ function createFeishuWs({
   }
 
   function dispatch(name, data) {
+    // 消息没反应时，没有这条日志就分不清「飞书没推」还是「被规则丢了」。
+    const msg = data && data.message;
+    log?.info?.('ws.event', {
+      name,
+      chatId: (msg && msg.chat_id) || (data && data.chat_id) || null,
+      chatType: (msg && msg.chat_type) || null,
+      mentioned: Boolean(msg && Array.isArray(msg.mentions) && msg.mentions.length),
+      msgType: (msg && msg.message_type) || null,
+    });
     if (data && data.event_id && dedup.isDuplicate(data.event_id)) {
       log?.debug?.(`ws: duplicate ${name} ${data.event_id}`);
       return;

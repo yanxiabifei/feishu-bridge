@@ -221,3 +221,32 @@ test('非 Error 拒绝/抛出值的日志可读', async () => {
   assert.ok(s.logs.some((m) => m.includes('plain async boom')));
   assert.ok(s.logs.some((m) => m.includes('[object Object]')));
 });
+
+// 排障时最大的坑：消息没进来时完全没痕迹，分不清「飞书没推」「被没 @ 的规则丢了」。
+// 每个事件都留一条结构化日志，至少能看出有没有到、是哪个群、有没有 @ 我。
+test('收到任何事件都记一条 ws.event 日志', () => {
+  const { sdk, registered } = makeSdk();
+  const events = [];
+  createFeishuWs({
+    appId: 'cli_0123456789abcdef',
+    appSecret: 'sec',
+    sdk,
+    log: { info: (event, fields) => events.push({ event, ...fields }) },
+    handlers: { onMessage: () => {} },
+  });
+
+  registered['im.message.receive_v1']({
+    event_id: 'e1',
+    message: {
+      chat_id: 'oc_1', chat_type: 'group', message_type: 'text',
+      mentions: [{ key: '@_user_1' }],
+    },
+  });
+
+  assert.strictEqual(events.length, 1);
+  assert.strictEqual(events[0].event, 'ws.event');
+  assert.strictEqual(events[0].name, 'onMessage');
+  assert.strictEqual(events[0].chatId, 'oc_1');
+  assert.strictEqual(events[0].chatType, 'group');
+  assert.strictEqual(events[0].mentioned, true);
+});
