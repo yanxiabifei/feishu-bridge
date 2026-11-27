@@ -471,10 +471,17 @@ test('releaseTurn 在非 running 状态不改写队列', () => {
 
 // ---- 变异 3：env 必须继承宿主环境变量 ----
 
+// Windows 环境变量名大小写不敏感：宿主可能是 PATH，也可能是 Path，
+// 取决于谁先创建了这个变量（CI 上 npm run-script 会给出 Path）。
+function envPath(env) {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH');
+  return key === undefined ? undefined : env[key];
+}
+
 test('ptyFactory 的 env 继承宿主 PATH', () => {
   const h = harness();
   h.ps.start();
-  assert.strictEqual(h.factoryCalls[0].opts.env.PATH, process.env.PATH);
+  assert.strictEqual(envPath(h.factoryCalls[0].opts.env), process.env.PATH);
 });
 
 // 先把桥从终端里起一遍就会发现：宿主是 Claude Code 时，环境里的会话标记会让子 claude
@@ -491,7 +498,7 @@ test('ptyFactory 的 env 剔除宿主 Claude Code 会话标记', () => {
     h.ps.start();
     const env = h.factoryCalls[0].opts.env;
     for (const k of markers) assert.strictEqual(k in env, false, `${k} 不应传给子进程`);
-    assert.strictEqual(env.PATH, process.env.PATH);
+    assert.strictEqual(envPath(env), process.env.PATH);
     assert.strictEqual(env.TERM, 'xterm-256color');
   } finally {
     for (const k of markers) {
