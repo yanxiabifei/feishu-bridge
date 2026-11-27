@@ -17,6 +17,8 @@ const DEFAULTS = {
   codexArgs: ['--dangerously-bypass-approvals-and-sandbox'],
   defaultCwd: path.join(os.homedir(), 'feishu-workspace'),
   queueLimit: 20,
+  intakeEnabled: true,
+  intakeTimeoutMs: 20000,
   inFlightTimeoutMs: 900000,
   sweepIntervalMs: 30000,
   ipcPort: 47831,

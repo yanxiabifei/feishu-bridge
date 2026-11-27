@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { parseFirstMessage } = require('./router');
+const { decide, runIntakeCli } = require('./intake');
 const { loadProjects } = require('../projects');
 const paths = require('../paths');
 const cards = require('../feishu/cards');
@@ -34,8 +34,10 @@ function createManager({
   fsApi = fs,
   getProjects = null,
   mediaRoot = paths.MEDIA,
+  runIntake = null,
 }) {
   const sessions = new Map();
+  const booting = new Map();        // chatId -> 无头接待期间收到的后续消息，建好会话后补投
   let shuttingDown = false;
   const forcePending = new Map();   // chatId -> { text }：被护栏拦下、等「仍然发送」的那句
   const TOOL_SUMMARY_MAX_BYTES = 20 * 1024 * 1024;
@@ -66,6 +68,17 @@ function createManager({
   function labelOf(record) {
     return record.alias || path.basename(record.cwd) || record.agent;
   }
+
+  function displayName(record) {
+    return record.groupName || labelOf(record);
+  }
+
+  const runIntakeFn = runIntake || (({ prompt, timeoutMs }) => runIntakeCli({
+    prompt,
+    timeoutMs,
+    exe: config.claudeExe,
+    cwd: config.defaultCwd,
+  }));
 
   function onEvent(e) {
     const record = store.get(e.sessionId);
@@ -124,13 +137,14 @@ function createManager({
     return ps;
   }
 
-  function newRecord({ chatId, chatName, cwd, alias, agent }) {
+  function newRecord({ chatId, chatName, cwd, alias, agent, groupName = null }) {
     const at = new Date(now()).toISOString();
     return {
       id: newId(),
       agent: agent === 'codex' ? 'codex' : 'claude',
       cwd,
       alias: alias || null,
+      groupName: groupName || null,
       chatId,
       chatName,
       claudeSessionId: null,
@@ -147,7 +161,7 @@ function createManager({
   // 新群首次绑定只自动改名一次，名字取别名/目录名；之后用户手改的不再覆盖
   async function renameGroupOnce(record) {
     if (record.groupRenamed) return;
-    const name = labelOf(record);
+    const name = displayName(record);
     if (!name) return;
     try {
       await api.renameChat(record.chatId, name);
@@ -165,37 +179,63 @@ function createManager({
     if (store.getByChat(chatId)) {
       throw new Error('这个群已经有会话了，直接在群里发消息就行');
     }
+    // 无头接待要跑几秒，这段时间里连发的消息先攒着，建好会话后补投
+    if (booting.has(chatId)) {
+      booting.get(chatId).texts.push(text);
+      return null;
+    }
+    booting.set(chatId, { texts: [] });
 
+    try {
+      return await createFromPhoneInner({ chatId, chatName, text, agent });
+    } finally {
+      const { texts } = booting.get(chatId) || { texts: [] };
+      booting.delete(chatId);
+      const record = store.getByChat(chatId);
+      const ps = record && sessions.get(record.id);
+      if (ps) {
+        for (const extra of texts) {
+          if (extra) ps.submitText(extra, 'phone');
+        }
+      }
+    }
+  }
+
+  async function createFromPhoneInner({ chatId, chatName, text, agent }) {
     const projects = loadProjectsFn();
-    const parsed = parseFirstMessage(text, {
-      aliases: projects.aliases,
-      defaultCwd: projects.default || config.defaultCwd,
+    const plan = await decide({
+      text,
+      projects,
+      defaultCwd: config.defaultCwd,
       exists: (p) => fsApi.existsSync(p),
+      enabled: config.intakeEnabled !== false,
+      timeoutMs: config.intakeTimeoutMs,
+      runIntake: runIntakeFn,
     });
 
-    if (parsed.source === 'path-missing') {
+    if (plan.source === 'path-missing') {
       await api.sendCard(chatId, cards.errorCard({
         title: '目录不存在',
-        text: `你说的路径在本机不存在：\n\`${parsed.prompt.split(/\s+/)[0]}\`\n\n换一个目录，或者直接说要做的事（会落到默认目录 \`${config.defaultCwd}\`）。`,
+        text: `你说的路径在本机不存在：\n\`${String(plan.rawPrompt || '').split(/\s+/)[0]}\`\n\n换一个目录，或者直接说要做的事（会落到默认目录 \`${config.defaultCwd}\`）。`,
       }));
       return null;
     }
 
-    if (!fsApi.existsSync(parsed.cwd)) {
-      if (parsed.source !== 'default') {
+    if (!fsApi.existsSync(plan.cwd)) {
+      if (plan.source !== 'default') {
         await api.sendCard(chatId, cards.errorCard({
           title: '目录不存在',
-          text: `别名「${parsed.alias}」指向的目录不存在：\n\`${parsed.cwd}\``,
+          text: `别名「${plan.alias}」指向的目录不存在：\n\`${plan.cwd}\``,
         }));
         return null;
       }
       try {
-        fsApi.mkdirSync(parsed.cwd, { recursive: true });
+        fsApi.mkdirSync(plan.cwd, { recursive: true });
       } catch (err) {
-        log.error('目录创建失败', { cwd: parsed.cwd, message: errMessage(err) });
+        log.error('目录创建失败', { cwd: plan.cwd, message: errMessage(err) });
         await api.sendCard(chatId, cards.errorCard({
           title: '目录创建失败',
-          text: `没能创建默认目录：\n\`${parsed.cwd}\`\n\n${errMessage(err)}`,
+          text: `没能创建默认目录：\n\`${plan.cwd}\`\n\n${errMessage(err)}`,
         }));
         return null;
       }
@@ -203,10 +243,11 @@ function createManager({
 
     const record = newRecord({
       chatId,
-      chatName: chatName || parsed.alias || path.basename(parsed.cwd),
-      cwd: parsed.cwd,
-      alias: parsed.alias,
-      agent: parsed.agent || agent,
+      chatName: chatName || plan.groupName || plan.alias || path.basename(plan.cwd),
+      cwd: plan.cwd,
+      alias: plan.alias,
+      agent: plan.agent || agent,
+      groupName: plan.groupName,
     });
     store.upsert(record);
     try {
@@ -224,12 +265,13 @@ function createManager({
 
     // 首条必须在任何 await 之前入队：否则连发两条时第二条会抢先拿到 seq，
     // 且卡片发送失败会让函数 reject、首条提示词永远写不进去。
-    if (parsed.prompt) sessions.get(record.id).submitText(parsed.prompt, 'phone');
+    if (plan.prompt) sessions.get(record.id).submitText(plan.prompt, 'phone');
     try {
+      const note = plan.note ? `\n\n${plan.note}` : '';
       await api.sendCard(chatId, cards.noticeCard({
         title: '✅ 已开工',
         template: 'green',
-        text: `${labelOf(record)} · \`${record.cwd}\`\n\n${parsed.prompt ? '第一条已进队，处理中…' : '可以直接说话。'}`,
+        text: `${displayName(record)} · \`${record.cwd}\`${note}\n\n${plan.prompt ? '第一条已进队，处理中…' : '可以直接说话。'}`,
       }));
     } catch (err) {
       log.warn('已开工卡片发送失败', { sessionId: record.id, message: errMessage(err) });

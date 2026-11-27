@@ -1,7 +1,7 @@
 # 手机建群「无头接待」设计规格
 
 - 日期：2026-11-27
-- 状态：待评审
+- 状态：已实现（2026-11-27）
 - 范围：`createFromPhone` 建会话前的决策环节
 
 ---
@@ -57,10 +57,12 @@
 ```
 claude -p "<prompt>" --output-format json --tools "" \
        --exclude-dynamic-system-prompt-sections --max-turns 2 \
-       --json-schema <schema>
+       --no-session-persistence --json-schema <schema>
 ```
 
 - 可执行文件取 `config.claudeExe`。
+- `--no-session-persistence`：不落 transcript，进程退出即彻底消失，事后无法被
+  `--resume` 接回——这是用户明确要求的一次性语义。
 - 实测：5–9 秒，约 6.5k 输入 token，返回 `structured_output`（schema 保证格式）。
 - 子进程环境沿用 `childEnv()` 的剔除表（去掉 `CLAUDECODE` 等宿主标记），否则会出现
   「Transcript saving is off」这类页脚干扰。
@@ -115,7 +117,8 @@ claude -p "<prompt>" --output-format json --tools "" \
 ```
 
 - 只有两行摘要，不塞完整对话。
-- 「已开工」卡片展示同样的摘要是可以接受的，用户能在手机上一眼看到接待判断。
+- 仅当接待自己写了 `prompt` 时才拼这个备忘块；它没给指令时沿用规则指令，不硬塞摘要。
+- 「已开工」卡片同样展示摘要，用户能在手机上一眼看到接待判断。
 
 ---
 

@@ -48,6 +48,7 @@ function fakeApi(overrides = {}) {
 
 function setup({
   apiOverrides, fsApi, getProjects, now, projects, spawnThrows = false, ipc: ipcArg = null, configOverrides, log: logArg = null,
+  runIntake = null,
 } = {}) {
   const store = fakeStore();
   const { api, calls } = fakeApi(apiOverrides);
@@ -101,6 +102,7 @@ function setup({
       ownerOpenId: 'ou_me',
       queueLimit: 20,
       autoDisband: false,
+      intakeEnabled: false,
       ...configOverrides,
     },
     api,
@@ -108,6 +110,7 @@ function setup({
     log,
     createPtySession,
     ipc,
+    runIntake,
     mediaRoot: 'D:/media',
     now: now || (() => new Date(2026, 10, 23, 21, 40).getTime()),
     rand: () => 0,
@@ -1067,4 +1070,81 @@ test('shutdown：落盘失败不击穿，会话仍标 interrupted 并有 warn', 
   assert.strictEqual(store.get(rec.id).status, 'interrupted');
   assert.strictEqual(manager._sessions.size, 0);
   assert.ok(log.warns.some(([msg]) => msg === '停机落盘失败'));
+});
+
+test('无头接待：群名与首条指令用接待结论，交接块带原话和备注', async () => {
+  const { manager, calls, spawned } = setup({
+    configOverrides: { intakeEnabled: true },
+    runIntake: async () => ({
+      cwd: 'D:/card', groupName: '卡牌技能', prompt: '给卡牌加一个技能', note: '按别名定位',
+    }),
+  });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '卡牌 加个技能' });
+
+  assert.strictEqual(rec.cwd, 'D:/card');
+  assert.strictEqual(rec.groupName, '卡牌技能');
+  assert.strictEqual(spawned[0].submitted.length, 1);
+  const first = spawned[0].submitted[0].text;
+  assert.ok(first.includes('用户原话「卡牌 加个技能」'));
+  assert.ok(first.includes('工作目录 D:/card'));
+  assert.ok(first.includes('按别名定位'));
+  assert.ok(first.endsWith('给卡牌加一个技能'));
+
+  assert.deepStrictEqual(calls.find((c) => c[0] === 'renameChat'), ['renameChat', 'oc_1', '卡牌技能']);
+  assert.strictEqual(rec.groupRenamed, true);
+  const card = calls.find((c) => c[0] === 'sendCard')[2];
+  assert.ok(JSON.stringify(card).includes('按别名定位'));
+});
+
+test('无头接待失败：照常建会话，首条用规则结果', async () => {
+  const { manager, spawned } = setup({
+    configOverrides: { intakeEnabled: true },
+    runIntake: async () => { throw new Error('超时'); },
+  });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '卡牌 加个技能' });
+  assert.ok(rec);
+  assert.strictEqual(rec.groupName, null);
+  assert.deepStrictEqual(spawned[0].submitted, [{ text: '加个技能', origin: 'phone' }]);
+});
+
+test('无头接待关闭：完全不调用 runner', async () => {
+  let called = 0;
+  const { manager } = setup({ runIntake: async () => { called += 1; } });
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '卡牌 加个技能' });
+  assert.strictEqual(called, 0);
+});
+
+test('无头接待期间连发两条：只建一个会话，后续消息补投进去', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const { manager, spawned } = setup({
+    configOverrides: { intakeEnabled: true },
+    runIntake: async () => { await gate; return { groupName: '卡牌技能', prompt: '给卡牌加一个技能' }; },
+  });
+
+  const first = manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '卡牌 加个技能' });
+  await new Promise((r) => setImmediate(r));
+  const second = manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '顺便加个测试' });
+  release();
+  await Promise.all([first, second]);
+
+  assert.strictEqual(spawned.length, 1);
+  const texts = spawned[0].submitted.map((s) => s.text);
+  assert.ok(texts.some((t) => t.endsWith('给卡牌加一个技能')));
+  assert.ok(texts.includes('顺便加个测试'));
+});
+
+test('规则 path-missing：发错误卡，不调无头', async () => {
+  let called = 0;
+  const { manager, calls, spawned } = setup({
+    configOverrides: { intakeEnabled: true },
+    runIntake: async () => { called += 1; },
+    fsApi: { existsSync: (p) => p !== 'Q:/nope', mkdirSync() {} },
+  });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: 'Q:/nope 干活' });
+  assert.strictEqual(rec, null);
+  assert.strictEqual(called, 0);
+  assert.strictEqual(spawned.length, 0);
+  const card = calls.find((c) => c[0] === 'sendCard')[2];
+  assert.ok(JSON.stringify(card).includes('目录不存在'));
 });

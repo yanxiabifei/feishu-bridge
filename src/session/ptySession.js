@@ -239,4 +239,4 @@ function createPtySession({
   };
 }
 
-module.exports = { createPtySession };
+module.exports = { createPtySession, childEnv };
