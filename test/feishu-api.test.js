@@ -127,6 +127,16 @@ test('createGroup 传 user_id_list 并返回 chat_id', async () => {
   assert.strictEqual(body.chat_mode, 'group');
 });
 
+test('renameChat 用 PUT 改群名', async () => {
+  const { api, calls } = apiWith(({ url }) => (
+    tokenRoute(url) || { code: 0, msg: 'ok', data: {} }
+  ));
+  await api.renameChat('oc_1', '卡牌');
+  const call = calls.find((c) => c.url.includes('/open-apis/im/v1/chats/oc_1'));
+  assert.strictEqual(call.opts.method, 'PUT');
+  assert.deepStrictEqual(JSON.parse(call.opts.body), { name: '卡牌' });
+});
+
 test('getChat 遇到 230002（群不存在）返回 null，其他错误照抛', async () => {
   const gone = apiWith(({ url }) => (
     tokenRoute(url) || { code: 230002, msg: 'chat not found' }

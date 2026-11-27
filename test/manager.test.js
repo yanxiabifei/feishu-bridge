@@ -34,6 +34,7 @@ function fakeApi(overrides = {}) {
     async sendText(chatId, text) { calls.push(['sendText', chatId, text]); },
     async sendCard(chatId, card) { calls.push(['sendCard', chatId, card]); },
     async createGroup(name, openIds) { calls.push(['createGroup', name, openIds]); return 'oc_new'; },
+    async renameChat(chatId, name) { calls.push(['renameChat', chatId, name]); },
     async getChat() { return { chat_id: 'oc' }; },
     async disbandChat(chatId) { calls.push(['disbandChat', chatId]); },
     async createCardEntity(card) { calls.push(['createCardEntity', card]); return 'card_1'; },
@@ -141,6 +142,39 @@ test('createFromPhone：别名命中 → 建记录、起 PTY、提交首条、�
 
   const cardCall = calls.find((c) => c[0] === 'sendCard');
   assert.ok(cardCall[2].header.title.content.includes('已开工'));
+});
+
+test('createFromPhone：首次绑定自动把群名改成别名', async () => {
+  const { manager, store, calls } = setup();
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '卡牌 加个技能' });
+
+  const rename = calls.find((c) => c[0] === 'renameChat');
+  assert.deepStrictEqual(rename, ['renameChat', 'oc_1', '卡牌']);
+  assert.strictEqual(rec.groupRenamed, true);
+  assert.strictEqual(store.getByChat('oc_1').chatName, '卡牌');
+});
+
+test('createFromPhone：改群名失败不阻断建会话，只记 warn', async () => {
+  const log = fakeLog();
+  const { manager, spawned } = setup({
+    log,
+    apiOverrides: { renameChat: async () => { throw new Error('没权限'); } },
+  });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '卡牌 加个技能' });
+
+  assert.ok(rec);
+  assert.strictEqual(spawned[0].started, true);
+  assert.deepStrictEqual(spawned[0].submitted, [{ text: '加个技能', origin: 'phone' }]);
+  assert.ok(log.warns.some(([m]) => m.includes('自动改群名')));
+  assert.strictEqual(rec.groupRenamed, undefined, '没改成就不打标');
+});
+
+test('createFromPhone：没别名时用目录名当群名', async () => {
+  const { manager, calls } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '随便做点什么' });
+
+  const rename = calls.find((c) => c[0] === 'renameChat');
+  assert.deepStrictEqual(rename, ['renameChat', 'oc_1', 'w']);
 });
 
 test('createFromPhone：只发别名时不提交空提示词', async () => {

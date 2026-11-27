@@ -144,6 +144,23 @@ function createManager({
     };
   }
 
+  // 新群首次绑定只自动改名一次，名字取别名/目录名；之后用户手改的不再覆盖
+  async function renameGroupOnce(record) {
+    if (record.groupRenamed) return;
+    const name = labelOf(record);
+    if (!name) return;
+    try {
+      await api.renameChat(record.chatId, name);
+      record.groupRenamed = true;
+      record.chatName = name;
+      store.upsert(record);
+      log.info?.('chat.auto_renamed', { chatId: record.chatId, name });
+    } catch (err) {
+      // 没 im:chat 权限之类的情况不阻断建会话
+      log.warn('自动改群名失败', { chatId: record.chatId, message: errMessage(err) });
+    }
+  }
+
   async function createFromPhone({ chatId, chatName, text, agent = 'claude' }) {
     if (store.getByChat(chatId)) {
       throw new Error('这个群已经有会话了，直接在群里发消息就行');
@@ -217,6 +234,7 @@ function createManager({
     } catch (err) {
       log.warn('已开工卡片发送失败', { sessionId: record.id, message: errMessage(err) });
     }
+    await renameGroupOnce(record);
     return record;
   }
 

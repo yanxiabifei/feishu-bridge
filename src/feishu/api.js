@@ -113,6 +113,10 @@ function createApi({
       }
     },
 
+    renameChat: (chatId, name) => request('PUT', `/open-apis/im/v1/chats/${chatId}`, {
+      body: { name },
+    }),
+
     disbandChat: (chatId) => request('DELETE', `/open-apis/im/v1/chats/${chatId}`),
 
     downloadResource: (messageId, fileKey, type) => request(
