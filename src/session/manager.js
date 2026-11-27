@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { decide, runIntakeCli } = require('./intake');
+const { cleanCodexSnapshot } = require('./codexOutput');
 const { loadProjects } = require('../projects');
 const paths = require('../paths');
 const cards = require('../feishu/cards');
@@ -448,7 +449,7 @@ function createManager({
     if (!ps || ['error', 'closed', 'closing', 'interrupted'].includes(record.status)) return;
     let snap = '';
     try {
-      snap = ps.screen.snapshot({ lines: 40 });
+      snap = cleanCodexSnapshot(ps.screen.snapshot({ lines: 40 }));
     } catch (err) {
       log.warn('取画面失败', { sessionId: record.id, message: String((err && err.message) || err) });
       return;

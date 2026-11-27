@@ -924,6 +924,29 @@ test('codex turn-end：把最近画面推回群里，电脑来源带 🖥 引言
   assert.strictEqual(h.store.get(rec.id).status, 'idle');
 });
 
+test('codex turn-end：推送前切掉输入框和页脚', async () => {
+  const h = setup();
+  await h.manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 codex 写个快排' });
+  const ps = h.spawned[0];
+  ps.emit({ type: 'ready' });
+  ps.emit({ type: 'turn-start', text: '写个快排' });
+  ps.screenText = [
+    '• 好的：',
+    '  def quicksort(x):',
+    '      return x',
+    '› Ask Codex to do anything',
+    'gpt-5.1-codex high · D:/w',
+    '? for shortcuts',
+  ].join('\n');
+  ps.emit({ type: 'turn-end' });
+  await h.manager._drain();
+
+  const body = JSON.stringify(h.calls.filter((c) => c[0] === 'sendCard').at(-1)[2].body);
+  assert.ok(body.includes('def quicksort'));
+  assert.ok(!body.includes('Ask Codex to do anything'), '输入框占位符不应进卡片');
+  assert.ok(!body.includes('for shortcuts'), '页脚不应进卡片');
+});
+
 test('onCardAction：full-screen 回最近 200 行画面', async () => {
   const { manager, calls, spawned } = await started();
   spawned[0].screenText = '第 1 行\n第 200 行';
