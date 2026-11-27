@@ -5,6 +5,7 @@ const { card } = require('./feishu/cards');
 const HELP_TEXT = [
   '我是你的电脑终端桥，私聊时是总控面板：',
   '· 发「列表」看所有会话',
+  '· 发「状态」看守护进程、长连接和会话健康',
   '· 发「结束 <别名>」关掉某个会话',
   '· 发「改名 <旧名> <新名>」改项目别名（也可以点面板上的按钮）',
   '要开工，请在项目群里 @我 说「<别名> 要做什么」。',
@@ -26,7 +27,8 @@ const HELP_ONLY = /^(帮助|help|\?|？)$/i;
 function parseControl(text) {
   const t = String(text || '').trim();
   if (!t) return { act: 'help' };
-  if (/^(列表|会话|面板|状态)$/.test(t)) return { act: 'list' };
+  if (/^(列表|会话|面板)$/.test(t)) return { act: 'list' };
+  if (t === '状态') return { act: 'status' };
   if (HELP_ONLY.test(t)) return { act: 'help' };
   let m = t.match(/^(?:结束|关闭|关掉)\s+(.+)$/);
   if (m) return { act: 'end', target: m[1].trim() };
@@ -35,20 +37,94 @@ function parseControl(text) {
   return { act: 'help' };
 }
 
+const WS_TEXT = {
+  connected: '已连接',
+  connecting: '连接中',
+  reconnecting: '重连中',
+  failed: '连接失败',
+};
+
+function aliasOfSession(s, aliases) {
+  const current = aliases && typeof aliases === 'object'
+    ? Object.keys(aliases).find((k) => aliases[k] === s.cwd)
+    : null;
+  return current || s.alias || null;
+}
+
 function formatSessions(list, aliases = null) {
   if (!Array.isArray(list) || list.length === 0) {
     return '现在没有会话。去项目群里 @我 发一句就能开工。';
   }
   return list.map((s, i) => {
-    const current = aliases && typeof aliases === 'object'
-      ? Object.keys(aliases).find((k) => aliases[k] === s.cwd)
-      : null;
-    const alias = current || s.alias;
+    const alias = aliasOfSession(s, aliases);
     const name = alias ? `${alias}（${s.cwd}）` : (s.cwd || s.id);
     const agent = s.agent === 'codex' ? 'Codex' : 'Claude';
     const status = STATUS_TEXT[s.status] || s.status || '未知';
     return `${i + 1}. ${name} · ${agent} · ${status}`;
   }).join('\n');
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function formatAgo(ms) {
+  if (!Number.isFinite(ms) || ms < 60000) return '刚刚';
+  const min = Math.floor(ms / 60000);
+  if (min < 60) return `${min} 分钟前`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} 小时前`;
+  return `${Math.floor(h / 24)} 天前`;
+}
+
+function formatUptime(ms) {
+  if (!Number.isFinite(ms) || ms < 60000) return '不到 1 分钟';
+  const min = Math.floor(ms / 60000);
+  if (min < 60) return `${min} 分钟`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${h} 小时 ${m} 分` : `${h} 小时`;
+}
+
+function formatWs(ws) {
+  if (!ws || !ws.state) return '未知';
+  let text = WS_TEXT[ws.state] || ws.state;
+  if (ws.state === 'reconnecting' && ws.reconnectAttempts) {
+    text += `（第 ${ws.reconnectAttempts} 次）`;
+  }
+  if (Number.isFinite(ws.lastConnectTime) && ws.lastConnectTime > 0) {
+    const d = new Date(ws.lastConnectTime);
+    text += ` · ${pad2(d.getHours())}:${pad2(d.getMinutes())} 握手`;
+  }
+  return text;
+}
+
+// 守护进程 / 长连接 / 会话的健康快照；纯文本，手机上不占一屏卡片
+function formatHealth({
+  startedAt, now = Date.now(), pid = null, ipcPort = null,
+  ws = null, sessions = [], aliases = null,
+} = {}) {
+  const lines = ['🩺 桥接状态'];
+  lines.push(`守护进程：运行 ${formatUptime(now - Number(startedAt))}${pid ? ` · PID ${pid}` : ''}`);
+  lines.push(`飞书长连接：${formatWs(ws)}`);
+  if (ipcPort) lines.push(`IPC：127.0.0.1:${ipcPort}`);
+  const list = Array.isArray(sessions) ? sessions : [];
+  if (list.length === 0) {
+    lines.push('会话：0 个。去项目群里 @我 发一句就能开工。');
+    return lines.join('\n');
+  }
+  lines.push(`会话：${list.length} 个`);
+  list.forEach((s, i) => {
+    const alias = aliasOfSession(s, aliases);
+    const name = alias ? `${alias}（${s.cwd}）` : (s.cwd || s.id);
+    const agent = s.agent === 'codex' ? 'Codex' : 'Claude';
+    const status = STATUS_TEXT[s.status] || s.status || '未知';
+    let line = `${i + 1}. ${name} · ${agent} · ${status}`;
+    const at = Date.parse(s.lastActiveAt || '');
+    if (Number.isFinite(at)) line += ` · ${formatAgo(now - at)}`;
+    lines.push(line);
+  });
+  return lines.join('\n');
 }
 
 function panelCard({ sessions, aliases }) {
@@ -69,7 +145,7 @@ function panelCard({ sessions, aliases }) {
   return card({ title: '🛰️ 总控面板', template: 'blue', elements });
 }
 
-function createControl({ api, listSessions, closeSession, getProjects, renameAlias, ownerOpenId, log }) {
+function createControl({ api, listSessions, closeSession, getProjects, renameAlias, getHealth, ownerOpenId, log }) {
   const pending = new Map(); // chatId -> 待改名的旧别名
 
   const send = (chatId, text) => api.sendText(chatId, text);
@@ -104,6 +180,18 @@ function createControl({ api, listSessions, closeSession, getProjects, renameAli
 
     const cmd = parseControl(body);
     if (cmd.act === 'list') { await sendPanel(chatId); return; }
+
+    if (cmd.act === 'status') {
+      let health = null;
+      try { health = typeof getHealth === 'function' ? getHealth() : null; } catch { health = null; }
+      if (!health) {
+        await send(chatId, '状态信息取不到了，看看守护进程是不是还在跑（发「列表」也能看看会话）。');
+        return;
+      }
+      const aliases = (getProjects() || {}).aliases;
+      await send(chatId, formatHealth({ ...health, aliases }));
+      return;
+    }
 
     if (cmd.act === 'end') {
       const list = listSessions();
@@ -157,5 +245,5 @@ function createControl({ api, listSessions, closeSession, getProjects, renameAli
 
 module.exports = {
   HELP_TEXT, STATUS_TEXT, MAX_ALIAS_BUTTONS,
-  parseControl, formatSessions, panelCard, createControl,
+  parseControl, formatSessions, formatHealth, panelCard, createControl,
 };

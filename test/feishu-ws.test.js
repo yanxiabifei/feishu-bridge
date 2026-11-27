@@ -13,7 +13,7 @@ function makeSdk() {
     }
   }
   class WSClient {
-    constructor(opts) { state.clientOpts = opts; }
+    constructor(opts) { state.clientOpts = opts; state.client = this; }
     start(args) { state.startArgs = args; return Promise.resolve(); }
     close() { state.closed = true; }
   }
@@ -65,6 +65,13 @@ test('start 传入 dispatcher；客户端静默日志', async () => {
   assert.strictEqual(state.clientOpts.appId, 'cli_0123456789abcdef');
   assert.strictEqual(state.clientOpts.loggerLevel, 0);
   assert.strictEqual(state.clientOpts.domain, 0);
+});
+
+test('status：透传 SDK 长连接状态；旧版 SDK 没有该方法时返回 null', () => {
+  const { ws, state } = setup();
+  assert.strictEqual(ws.status(), null);
+  state.client.getConnectionStatus = () => ({ state: 'connected', reconnectAttempts: 0 });
+  assert.deepStrictEqual(ws.status(), { state: 'connected', reconnectAttempts: 0 });
 });
 
 test('EventDispatcher 使用 fatal 级别并注入静默 logger', () => {

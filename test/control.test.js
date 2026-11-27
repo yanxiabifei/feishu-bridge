@@ -1,9 +1,11 @@
 // test/control.test.js
 const test = require('node:test');
 const assert = require('node:assert');
-const { parseControl, formatSessions, createControl } = require('../src/control');
+const {
+  parseControl, formatSessions, formatHealth, createControl,
+} = require('../src/control');
 
-function harness({ sessions = [], aliases = { 卡牌: 'D:/card' }, rename } = {}) {
+function harness({ sessions = [], aliases = { 卡牌: 'D:/card' }, rename, getHealth } = {}) {
   const calls = [];
   const renames = [];
   const api = {
@@ -17,6 +19,7 @@ function harness({ sessions = [], aliases = { 卡牌: 'D:/card' }, rename } = {}
     getProjects: () => ({ aliases, default: 'D:/w' }),
     renameAlias: (args) => { renames.push(args); return rename ? rename(args) : { ok: true }; },
     ownerOpenId: 'ou_me',
+    getHealth,
   });
   return { control, calls, renames };
 }
@@ -32,6 +35,79 @@ test('parseControl：列表 / 结束 / 改名 / 帮助 / 未知', () => {
   assert.deepStrictEqual(parseControl('帮助'), { act: 'help' });
   assert.deepStrictEqual(parseControl('随便说点啥'), { act: 'help' });
   assert.deepStrictEqual(parseControl(''), { act: 'help' });
+});
+
+test('parseControl：「状态」走健康检查，「列表」仍弹面板', () => {
+  assert.deepStrictEqual(parseControl('状态'), { act: 'status' });
+  assert.deepStrictEqual(parseControl(' 状态 '), { act: 'status' });
+  assert.deepStrictEqual(parseControl('列表'), { act: 'list' });
+  assert.deepStrictEqual(parseControl('会话'), { act: 'list' });
+});
+
+test('formatHealth：运行时长、长连接、IPC 和会话一览', () => {
+  const now = Date.parse('2026-11-27T22:00:00+08:00');
+  const startedAt = now - ((3 * 3600 + 25 * 60) * 1000);
+  const text = formatHealth({
+    startedAt,
+    now,
+    pid: 25984,
+    ipcPort: 47831,
+    ws: { state: 'connected', lastConnectTime: now - 60000 },
+    sessions: [
+      {
+        id: 's1', alias: '卡牌', cwd: 'D:/card', agent: 'claude', status: 'running',
+        lastActiveAt: new Date(now - 2 * 60000).toISOString(),
+      },
+      {
+        id: 's2', alias: null, cwd: 'D:/w', agent: 'codex', status: 'idle',
+        lastActiveAt: new Date(now - 3 * 3600000).toISOString(),
+      },
+    ],
+  });
+  assert.match(text, /运行 3 小时 25 分/);
+  assert.match(text, /PID 25984/);
+  assert.match(text, /已连接/);
+  assert.match(text, /127\.0\.0\.1:47831/);
+  assert.match(text, /会话：2 个/);
+  assert.match(text, /1\. 卡牌（D:\/card） · Claude · 运行中 · 2 分钟前/);
+  assert.match(text, /2\. D:\/w · Codex · 空闲 · 3 小时前/);
+});
+
+test('formatHealth：没有会话、长连接状态未知也能出结果', () => {
+  const now = Date.parse('2026-11-27T22:00:00+08:00');
+  const text = formatHealth({
+    startedAt: now - 30000, now, sessions: [], ws: null,
+  });
+  assert.match(text, /不到 1 分钟/);
+  assert.match(text, /未知/);
+  assert.match(text, /会话：0 个/);
+});
+
+test('私聊「状态」：回健康文本，不弹面板卡片', async () => {
+  const now = Date.now();
+  const { control, calls } = harness({
+    getHealth: () => ({
+      startedAt: now - 5 * 60000,
+      pid: 25984,
+      ipcPort: 47831,
+      ws: { state: 'connected' },
+      sessions: [{ id: 's1', alias: '卡牌', cwd: 'D:/card', agent: 'claude', status: 'idle' }],
+    }),
+  });
+  await control.onMessage({ chatId: 'oc_p2p', text: '状态', senderOpenId: 'ou_me' });
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0][0], 'text');
+  assert.match(calls[0][2], /桥接状态/);
+  assert.match(calls[0][2], /运行 5 分钟/);
+  assert.match(calls[0][2], /已连接/);
+  assert.match(calls[0][2], /1\. 卡牌（D:\/card）/);
+});
+
+test('私聊「状态」：健康数据取不到时给出明确提示', async () => {
+  const { control, calls } = harness();
+  await control.onMessage({ chatId: 'oc_p2p', text: '状态', senderOpenId: 'ou_me' });
+  assert.strictEqual(calls.length, 1);
+  assert.match(calls[0][2], /取不到/);
 });
 
 test('formatSessions：空列表与非空列表', () => {

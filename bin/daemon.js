@@ -52,6 +52,8 @@ async function createDaemon({ deps = {} } = {}) {
   if (!config.appId || !appSecret) throw new Error('缺少飞书凭据：先运行 npm run setup');
   log.redactor?.add(appSecret);
 
+  const startedAt = Date.now();
+
   const getProjectsFn = deps.getProjectsFn
     || (() => loadProjects({ file: pathsApi.PROJECTS, defaultCwd: config.defaultCwd }));
 
@@ -132,6 +134,15 @@ async function createDaemon({ deps = {} } = {}) {
     closeSession: (id, opts) => manager.closeSession(id, opts),
     getProjects: getProjectsFn,
     renameAlias: (args) => renameAlias({ file: pathsApi.PROJECTS, ...args }),
+    // ws 在后面声明，但闭包只在收到「状态」时才执行，那时已经初始化完毕
+    getHealth: () => ({
+      startedAt,
+      now: Date.now(),
+      pid: process.pid,
+      ipcPort: ipc.port,
+      ws: typeof ws.status === 'function' ? ws.status() : null,
+      sessions: manager.list(),
+    }),
     ownerOpenId: config.ownerOpenId,
     log,
   });

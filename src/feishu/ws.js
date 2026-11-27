@@ -102,6 +102,10 @@ function createFeishuWs({
   return {
     start: () => client.start({ eventDispatcher: dispatcher }),
     close: () => client.close(),
+    // 旧版 SDK 没有 getConnectionStatus，拿不到就返回 null，由调用方显示「未知」
+    status: () => (typeof client.getConnectionStatus === 'function'
+      ? client.getConnectionStatus()
+      : null),
   };
 }
 

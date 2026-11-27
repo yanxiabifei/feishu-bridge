@@ -150,6 +150,18 @@ test('装配：密钥进 redactor，store 先加载，各工厂拿到正确参�
   assert.strictEqual(daemon.port, 51000);
 });
 
+test('状态：getHealth 汇总守护进程、长连接与会话', async () => {
+  const { deps, calls, ws } = makeDeps();
+  ws.status = () => ({ state: 'reconnecting', reconnectAttempts: 2 });
+  await createDaemon({ deps });
+
+  const health = calls.controlOpts.getHealth();
+  assert.strictEqual(health.ipcPort, 51000);
+  assert.ok(Number.isFinite(health.startedAt));
+  assert.deepStrictEqual(health.ws, { state: 'reconnecting', reconnectAttempts: 2 });
+  assert.deepStrictEqual(health.sessions, []);
+});
+
 test('PTY 工厂：launch 拿到 hook 路径，spawn / 屏幕 / 队列逐个透传', async () => {
   const { deps, calls } = makeDeps();
   await createDaemon({ deps });
