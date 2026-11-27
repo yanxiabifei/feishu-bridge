@@ -28,8 +28,9 @@ function durationText(ms) {
 function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
+    // 不要 unref：这条超时是唯一能把「无声卡住」变成明确报错的东西，
+    // unref 后事件循环会先清空，进程直接退出，向导一个字都不打。
     timer = setTimeout(() => reject(new Error(`${label} ${durationText(ms)}后仍未完成`)), ms);
-    if (timer.unref) timer.unref();
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
