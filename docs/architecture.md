@@ -85,7 +85,7 @@ npm test            # 376 个用例，离线，约 10 秒
 npm run test:e2e    # 离线端到端（假 agent，不需要真 claude）
 ```
 
-CI 在 `.github/workflows/test.yml`，`windows-latest` × Node 20/22。
+CI 在 `.github/workflows/test.yml`，`windows-latest` × Node 22/24。
 
 ## 已知限制
 
