@@ -4,6 +4,29 @@ const READY_POLL_MS = 200;
 const CODEX_MIN_TURN_MS = 1500;   // 刚写进去的这段不判结束
 const CODEX_SETTLE_POLLS = 3;     // 静默稳定连续 3 次探测（200ms × 3）
 
+// 宿主自己跑在 Claude Code 里时（从终端里 `npm start` 就是这种情况），环境会带一串
+// 会话标记；传给子 claude 会让它认为自己是子会话，打出「Transcript saving is off」，
+// 多出来的页脚还会让输入框判定失败，手机消息就永远卡在队列里。
+const HOST_MARKER_VARS = [
+  'CLAUDECODE',
+  'AI_AGENT',
+  'CLAUDE_PID',
+  'CLAUDE_EFFORT',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+];
+
+function childEnv(base) {
+  const env = { ...base, FORCE_COLOR: '1', TERM: 'xterm-256color' };
+  for (const k of HOST_MARKER_VARS) delete env[k];
+  return env;
+}
+
 function createPtySession({
   session, launch, ptyFactory, screenFactory, queueFactory, log, onEvent,
   now = () => Date.now(), queueLimit = 20,
@@ -117,7 +140,7 @@ function createPtySession({
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
       cwd: l.cwd,
-      env: { ...process.env, FORCE_COLOR: '1', TERM: 'xterm-256color' },
+      env: childEnv(process.env),
     });
     pty.onData((d) => {
       if (disposed) return;

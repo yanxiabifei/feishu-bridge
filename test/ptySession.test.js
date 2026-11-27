@@ -477,6 +477,30 @@ test('ptyFactory 的 env 继承宿主 PATH', () => {
   assert.strictEqual(h.factoryCalls[0].opts.env.PATH, process.env.PATH);
 });
 
+// 先把桥从终端里起一遍就会发现：宿主是 Claude Code 时，环境里的会话标记会让子 claude
+// 打出「Transcript saving is off」，输入框判定失败，消息永远卡在队列里。
+test('ptyFactory 的 env 剔除宿主 Claude Code 会话标记', () => {
+  const markers = [
+    'CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE', 'AI_AGENT',
+    'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_PID',
+  ];
+  const saved = {};
+  for (const k of markers) { saved[k] = process.env[k]; process.env[k] = 'x'; }
+  try {
+    const h = harness();
+    h.ps.start();
+    const env = h.factoryCalls[0].opts.env;
+    for (const k of markers) assert.strictEqual(k in env, false, `${k} 不应传给子进程`);
+    assert.strictEqual(env.PATH, process.env.PATH);
+    assert.strictEqual(env.TERM, 'xterm-256color');
+  } finally {
+    for (const k of markers) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+});
+
 // ---- 变异 4：先写屏幕再派发 data ----
 
 test('PTY 输出先写屏幕再派发 data 事件', () => {
