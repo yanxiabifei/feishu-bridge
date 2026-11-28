@@ -103,6 +103,30 @@ test('未登记在 mentions 中的 @_user_N 仍被兜底正则剥离', () => {
   assert.strictEqual(m.mentioned, false);
 });
 
+test('句子中间的 @ 只吃掉 @ 本身，两侧各留一个空格', () => {
+  const m = parseMessage(evt({}, {
+    content: '{"text":"请 @_user_1 看一下"}',
+    mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: '桥' }],
+  }));
+  assert.strictEqual(m.text, '请 看一下');
+  assert.strictEqual(m.mentioned, true);
+});
+
+test('@ 独占一行时整行删掉，不留空行', () => {
+  const m = parseMessage(evt({}, {
+    chat_type: 'group',
+    content: '{"text":"@_user_1\\n看看这个"}',
+    mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: '桥' }],
+  }));
+  assert.strictEqual(m.text, '看看这个');
+});
+
+test('纯文本的缩进与空行原样保留，不再被压平', () => {
+  const raw = '看这段：\n    const x = 1;\n\n\n然后呢';
+  const m = parseMessage(evt({}, { content: JSON.stringify({ text: raw }) }));
+  assert.strictEqual(m.text, raw);
+});
+
 test('chat_id 为空串时返回 null', () => {
   assert.strictEqual(parseMessage(evt({}, { chat_id: '' })), null);
 });

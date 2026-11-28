@@ -17,7 +17,7 @@ function postToText(post) {
     if (el.tag === 'a') return String(el.text || '') || String(el.href || '');
     if (el.tag === 'at') return el.user_name ? `@${el.user_name}` : '';
     if (el.tag === 'code_block') {
-      // 代码块保留原文：用占位符绕过 stripMentions 的 @ 剥离与空白压缩
+      // 代码块保留原文：用占位符绕过 stripMentions 的 @ 剥离
       const parts = Array.isArray(el.text) ? el.text : [el.text];
       const code = parts.map((p) => String((p && typeof p === 'object' ? p.text : p) || '')).join('');
       if (!code) return '';
@@ -38,13 +38,21 @@ function postToText(post) {
   return { text, rawCode };
 }
 
+// 先标出要删的 @，只收拾它周围的空白。正文里的缩进、空行是用户手打的内容，不能整体压平
+const MENTION_MARK = '\uF000'; // 私用区字符，正文里不会出现
+
 function stripMentions(text, mentions) {
   let out = String(text || '');
   for (const m of mentions || []) {
-    if (m && m.key) out = out.split(m.key).join('');
+    if (m && m.key) out = out.split(m.key).join(MENTION_MARK);
   }
-  out = out.replace(/@_user_\d+/g, '');
-  return out.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  out = out.replace(/@_user_\d+/g, MENTION_MARK);
+  // 独占一行的 @（群里先 @机器人 再换行写正文很常见）整行删掉，不留空行
+  out = out.replace(/^[ \t]*\uF000[ \t]*\r?\n/gm, '');
+  // 行内的 @ 连同两侧空白收成一个空格
+  out = out.replace(/[ \t]*\uF000[ \t]*/g, ' ');
+  out = out.replace(/\uF000/g, '');
+  return out.trim();
 }
 
 function parseMessage(evt) {
