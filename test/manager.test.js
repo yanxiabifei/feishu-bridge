@@ -1427,3 +1427,22 @@ test('Stop：中途从手机发的消息不会顶掉电脑那条提问', async (
   assert.ok(body.includes('🖥 你刚在电脑上问：改下登录页'));
   assert.ok(!body.includes('顺便看日志'));
 });
+
+test('Stop：会话表落盘失败也不耽误定稿，不会再多发一张重复回复', async () => {
+  const log = fakeLog();
+  const { manager, store, calls, spawned, rec } = await started({ log });
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '现在几点' });
+  await manager._drain();
+  assert.ok(rec.pendingCard, '先有一张处理中卡片');
+  const sentBefore = calls.filter((c) => c[0] === 'sendCard').length;
+
+  // 磁盘写不进去：只该留下一条 warn，不能把回复弄丢，也不能把它当成「定稿失败」再发一张
+  store.save = () => { throw new Error('disk full'); };
+
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '十点半。' } });
+
+  const upd = calls.filter((c) => c[0] === 'updateCardEntity').at(-1);
+  assert.ok(upd && JSON.stringify(upd).includes('十点半。'), '回复必须写进原来那张卡');
+  assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, sentBefore, '不能重复发一张卡');
+  assert.ok(log.warns.some(([m]) => m === '落盘失败'));
+});

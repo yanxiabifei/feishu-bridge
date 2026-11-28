@@ -53,6 +53,16 @@ function createManager({
     return pendingWork;
   }
 
+  // 落盘失败只该留下日志：磁盘抖一下不能让回复发不出去，
+  // 更不能让 Stop 的卡片重试分支把「存盘失败」当成「定稿失败」再发一张重复卡。
+  function saveSession(record) {
+    try {
+      store.save();
+    } catch (err) {
+      log.warn('落盘失败', { sessionId: record && record.id, message: errMessage(err) });
+    }
+  }
+
   // 等到队列真正稳定：任务执行过程中可能又追加新任务，不能只 await 一次快照
   async function drainWork() {
     let prev;
@@ -396,7 +406,7 @@ function createManager({
       });
     }
     // 收尾前的 save 仍带着 pendingCard，这里补一次把已清空的状态落盘
-    store.save();
+    saveSession(record);
   }
 
   async function onHookStop({ sessionId, payload = {} }) {
@@ -419,7 +429,7 @@ function createManager({
     const stoppedPs = sessions.get(record.id);
     if (stoppedPs) stoppedPs.releaseTurn();
     record.lastActiveAt = new Date(now()).toISOString();
-    store.save();
+    saveSession(record);
     ipc?.broadcast({ type: 'session', session: record });
 
     if (input && !String(input.text || '').trim()) {   // 只按了回车，不推
@@ -459,7 +469,7 @@ function createManager({
           });
           await api.updateCardEntity(pending.cardId, card, pending.seq + 1);
         }
-        store.save();
+        saveSession(record);
         return;
       } catch (err) {
         log.warn('卡片定稿失败，改为新发一张', {
@@ -470,7 +480,7 @@ function createManager({
       }
     }
     await api.sendCard(record.chatId, card);
-    store.save();
+    saveSession(record);
   }
 
   async function notifyCrash(record, e) {
