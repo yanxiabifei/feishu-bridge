@@ -190,6 +190,18 @@ test('createFromPhone：只发别名时不提交空提示词', async () => {
   assert.deepStrictEqual(spawned[0].submitted, []);
 });
 
+test('createFromPhone：会话表落盘失败也要把会话建起来，首条消息不能悄悄丢', async () => {
+  const { manager, store, spawned } = setup();
+  // 真实 store 的 upsert 先改内存再落盘：落盘抛错时内存里已经有一条没有 PTY 的记录
+  store.upsert = (s) => { store.map.set(s.id, s); throw new Error('磁盘满了'); };
+
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 加个技能' });
+
+  assert.ok(rec, '落盘失败不能把建会话整个掀翻');
+  assert.strictEqual(spawned.length, 1);
+  assert.deepStrictEqual(spawned[0].submitted, [{ text: '加个技能', origin: 'phone' }]);
+});
+
 test('createFromPhone：已开工卡片发送失败时仍提交首条并 resolve', async () => {
   const log = fakeLog();
   const { manager, spawned } = setup({
@@ -960,6 +972,20 @@ test('回「重来」：原目录不在了就报错，不再拉起', async () =>
   assert.strictEqual(spawned.length, 1);
   const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
   assert.ok(card.header.title.content.includes('目录'));
+});
+
+test('回「重来」：会话表落盘失败也要把 PTY 拉起来，不能卡在没有进程的 starting', async () => {
+  const { manager, store, spawned, rec } = await started();
+  spawned[0].emit({ type: 'exit', code: 2 });
+  await manager._drain();
+  assert.strictEqual(store.get(rec.id).status, 'error');
+
+  store.save = () => { throw new Error('磁盘满了'); };
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
+
+  assert.strictEqual(spawned.length, 2, '落盘失败不能拦住重启');
+  assert.strictEqual(spawned[1].started, true);
+  assert.strictEqual(rec.status, 'starting');
 });
 
 test('tick：群已不存在 → 关闭会话；群还在 → 不动', async () => {

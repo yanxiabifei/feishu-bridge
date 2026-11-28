@@ -63,6 +63,16 @@ function createManager({
     }
   }
 
+  // 新会话记录落盘失败只影响重启后能不能恢复，不能把建会话流程整个掀翻：
+  // 内存里已经有了，PTY 该起还得起，首条消息该写还得写。
+  function upsertSession(record) {
+    try {
+      store.upsert(record);
+    } catch (err) {
+      log.warn('落盘失败', { sessionId: record && record.id, message: errMessage(err) });
+    }
+  }
+
   // 等到队列真正稳定：任务执行过程中可能又追加新任务，不能只 await 一次快照
   async function drainWork() {
     let prev;
@@ -299,7 +309,7 @@ function createManager({
       agent: plan.agent || agent,
       groupName: plan.groupName,
     });
-    store.upsert(record);
+    upsertSession(record);
     try {
       spawn(record);
     } catch (err) {
@@ -336,7 +346,7 @@ function createManager({
     const chatName = `${label} · ${stamp(now())}`;
     const chatId = await api.createGroup(chatName, [config.ownerOpenId]);
     const record = newRecord({ chatId, chatName, cwd, alias, agent });
-    store.upsert(record);
+    upsertSession(record);
     try {
       spawn(record);
     } catch (err) {
@@ -640,7 +650,7 @@ function createManager({
     record.turnSeq = (record.turnSeq || 0) + 1;
     record.lastActiveAt = new Date(now()).toISOString();
     record.resuming = record.agent === 'claude' && Boolean(record.claudeSessionId);
-    store.save();
+    saveSession(record);
     try {
       spawn(record);
     } catch (err) {
