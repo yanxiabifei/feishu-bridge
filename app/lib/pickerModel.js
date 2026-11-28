@@ -35,8 +35,22 @@ function buildPicker({ projects = {}, sessions = [], limit = RECENT_LIMIT } = {}
     .sort((a, b) => b.at - a.at)
     .slice(0, limit);
 
+  // 「接回正在跑的会话」：已结束的不再出现，其余按最后活动倒序
+  const resumable = sessions
+    .filter((s) => s && s.id && s.status !== 'closed' && s.status !== 'closing')
+    .map((s) => ({
+      id: s.id,
+      alias: aliasByCwd.get(s.cwd) || s.alias || dirName(s.cwd),
+      cwd: s.cwd || '',
+      agent: s.agent || null,
+      status: s.status || 'idle',
+      at: toMs(s.lastActiveAt || s.createdAt || 0),
+    }))
+    .sort((a, b) => b.at - a.at);
+
   return {
     recent,
+    resumable,
     aliases,
     defaultCwd: (projects && projects.default) || null,
     agents: ['claude', 'codex'],

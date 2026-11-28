@@ -74,6 +74,21 @@ test('picker：会话记录里的 ISO 时间字符串也能正确排序', () => 
   assert.deepStrictEqual(out.recent.map((r) => r.cwd), ['D:/new', 'D:/mid', 'D:/old']);
 });
 
+test('picker：可接回的会话只留未结束的，按最后活动倒序并带状态', () => {
+  const out = buildPicker({
+    projects: {},
+    sessions: [
+      { id: 'a', cwd: 'D:/a', alias: '旧', agent: 'claude', status: 'closed', createdAt: 50 },
+      { id: 'b', cwd: 'D:/b', alias: '跑着', agent: 'claude', status: 'running', createdAt: 10, lastActiveAt: 40 },
+      { id: 'c', cwd: 'D:/c', alias: '空闲', agent: 'codex', status: 'idle', createdAt: 20 },
+      { id: 'd', cwd: 'D:/d', status: 'error', createdAt: 30 },
+    ],
+  });
+  assert.deepStrictEqual(out.resumable.map((s) => s.id), ['b', 'd', 'c']);
+  assert.strictEqual(out.resumable[0].status, 'running');
+  assert.strictEqual(out.resumable[1].alias, 'd'); // 没别名时用目录名兜底
+});
+
 test('sessionFeed：replay 到达前的实时输出被丢弃，之后才写入', () => {
   const feed = createSessionFeed();
   assert.deepStrictEqual(feed.select('s1'), { type: 'attach', sessionId: 's1' });
