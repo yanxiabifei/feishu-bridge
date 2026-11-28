@@ -158,6 +158,42 @@ test('downloadResource 返回 Buffer', async () => {
   assert.strictEqual(buf.toString(), 'PNGDATA');
 });
 
+test('下载附件用更长的超时，不被业务接口的 15 秒超时打断', async () => {
+  // 大附件（几十 MB）在慢网下十几秒传不完；跟着业务超时走会误报「附件下载失败」
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('tenant_access_token')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 0, msg: 'ok', tenant_access_token: 't-1', expire: 7200 }),
+        text: async () => '',
+        arrayBuffer: async () => Buffer.from(''),
+      };
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve({
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => Buffer.from('BIG'),
+        json: async () => ({}),
+        text: async () => '',
+      }), 80);
+      if (opts.signal) {
+        opts.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(opts.signal.reason);
+        }, { once: true });
+      }
+    });
+  };
+  const api = createApi({
+    appId: 'cli_x', appSecret: 'sec', fetchImpl, requestTimeoutMs: 20,
+  });
+  const buf = await api.downloadResource('om_1', 'fk_1', 'file');
+  assert.strictEqual(buf.toString(), 'BIG');
+});
+
 test('updateCardEntity 带上 sequence 与 uuid', async () => {
   const { api, calls } = apiWith(({ url }) => (
     tokenRoute(url) || { code: 0, msg: 'ok', data: {} }

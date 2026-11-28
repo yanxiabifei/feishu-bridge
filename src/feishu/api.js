@@ -13,6 +13,9 @@ const CHAT_NOT_FOUND = 230002;
 // （99991661 是请求头没带，99991671 是格式不对，重试没有意义）
 const TOKEN_INVALID = new Set([99991663, 99991664]);
 
+// 附件按体积算：几十 MB 的文件在慢网下十几秒传不完，跟着业务接口的 15 秒超时走会误报下载失败
+const DOWNLOAD_TIMEOUT_MS = 120000;
+
 function createApi({
   appId,
   appSecret,
@@ -27,12 +30,12 @@ function createApi({
 
   // 飞书接口偶发不响应时，裸 fetch 会挂到 TCP 超时（几分钟），期间所有消息都堵着。
   // 统一加超时，并换成中文错误，免得日志里只看到 AbortError。
-  async function callFetch(url, opts) {
+  async function callFetch(url, opts, timeoutMs = requestTimeoutMs) {
     try {
-      return await fetchImpl(url, { ...opts, signal: AbortSignal.timeout(requestTimeoutMs) });
+      return await fetchImpl(url, { ...opts, signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
       if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-        throw new Error(`飞书请求超时（${Math.round(requestTimeoutMs / 1000)} 秒）：${new URL(url).pathname}`);
+        throw new Error(`飞书请求超时（${Math.round(timeoutMs / 1000)} 秒）：${new URL(url).pathname}`);
       }
       throw err;
     }
@@ -58,7 +61,7 @@ function createApi({
     return inflight;
   }
 
-  async function requestOnce(method, path, { query, body, raw = false } = {}) {
+  async function requestOnce(method, path, { query, body, raw = false, timeoutMs } = {}) {
     const t = await getToken();
     const qs = query ? `?${new URLSearchParams(query).toString()}` : '';
     const res = await callFetch(`${baseUrl}${path}${qs}`, {
@@ -68,7 +71,7 @@ function createApi({
         'content-type': 'application/json; charset=utf-8',
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    }, timeoutMs);
     // 网关 5xx 返回的是 HTML，直接 res.json() 会变成 "Unexpected token '<'"
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -159,7 +162,7 @@ function createApi({
     downloadResource: (messageId, fileKey, type) => request(
       'GET',
       `/open-apis/im/v1/messages/${messageId}/resources/${fileKey}`,
-      { query: { type }, raw: true },
+      { query: { type }, raw: true, timeoutMs: DOWNLOAD_TIMEOUT_MS },
     ),
 
     getBotInfo: () => withTokenRetry(async () => {
