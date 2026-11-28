@@ -40,7 +40,8 @@ test('endpoint：带 BOM 或坏内容时给出可操作的错误', (t) => {
 
 test('picker：近期目录按最后活动排序，别名表优先，默认目录单独给出', () => {
   const out = buildPicker({
-    projects: { aliases: { 'D:/card': '卡牌' }, default: 'D:/w' },
+    // projects.json 的别名方向是「别名 → 目录」，和 router 的扫描一致
+    projects: { aliases: { 卡牌: 'D:/card' }, default: 'D:/w' },
     sessions: [
       { id: 'a', cwd: 'D:/card', agent: 'claude', createdAt: 10 },
       { id: 'b', cwd: 'D:/blog', agent: 'codex', createdAt: 30 },

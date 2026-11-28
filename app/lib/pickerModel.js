@@ -5,6 +5,12 @@ const dirName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || '
 
 function buildPicker({ projects = {}, sessions = [], limit = RECENT_LIMIT } = {}) {
   const aliases = (projects && projects.aliases) || {};
+  // projects.json 里 aliases 的方向是「别名 → 目录」（和 router 扫描一致），
+  // 这里要按目录反查别名，直接拿 cwd 当下标永远查不中
+  const aliasByCwd = new Map();
+  for (const [name, cwd] of Object.entries(aliases)) {
+    if (typeof cwd === 'string' && !aliasByCwd.has(cwd)) aliasByCwd.set(cwd, name);
+  }
   const byCwd = new Map();
 
   for (const s of sessions) {
@@ -19,7 +25,7 @@ function buildPicker({ projects = {}, sessions = [], limit = RECENT_LIMIT } = {}
   const recent = [...byCwd.entries()]
     .map(([cwd, v]) => ({
       cwd,
-      alias: aliases[cwd] || v.alias || dirName(cwd),
+      alias: aliasByCwd.get(cwd) || v.alias || dirName(cwd),
       agent: v.agent,
       at: v.at,
     }))
