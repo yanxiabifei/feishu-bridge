@@ -318,6 +318,16 @@ test('IPC 客户端消息：list / ping / input / resize / create / close / 未�
   assert.ok(sent.some((o) => o.type === 'error' && o.message.includes('bogus')));
 });
 
+test('IPC projects：把别名表和默认目录给项目选择器', async () => {
+  const { deps, calls, ipc } = makeDeps();
+  await createDaemon({ deps });
+  ipc.handlers.onClientMessage({ type: 'projects' }, { fake: true });
+  assert.deepStrictEqual(calls.sent.at(-1).obj, {
+    type: 'projects',
+    projects: { aliases: { 卡牌: 'D:/card' }, default: 'D:/w' },
+  });
+});
+
 test('IPC attach：先回会话记录，再回屏幕快照（镜像窗口靠它补历史画面）', async () => {
   const h = makeDeps();
   await createDaemon({ deps: h.deps });

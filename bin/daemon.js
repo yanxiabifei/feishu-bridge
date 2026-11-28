@@ -69,6 +69,17 @@ async function createDaemon({ deps = {} } = {}) {
     if (type === 'ping') { ipc.send(ws, { type: 'pong' }); return; }
     if (!manager) { ipc.send(ws, { type: 'error', message: '会话管理器未就绪' }); return; }
     if (type === 'list') { ipc.send(ws, { type: 'sessions', list: manager.list() }); return; }
+    if (type === 'projects') {
+      // 项目选择器的「最近使用」：别名表 + 默认目录
+      let projects = { aliases: {}, default: null };
+      try {
+        projects = getProjectsFn() || projects;
+      } catch (err) {
+        log.warn('读取项目表失败', { message: errText(err) });
+      }
+      ipc.send(ws, { type: 'projects', projects });
+      return;
+    }
     if (type === 'attach') {
       const found = manager.list().find((s) => s.id === msg.sessionId);
       if (!found) {
