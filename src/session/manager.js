@@ -73,6 +73,16 @@ function createManager({
     }
   }
 
+  // 回滚一条没建成的会话记录：落盘失败只影响重启后丢一条残留记录，
+  // 不能把「启动失败」的提示和空群清理一起吞掉。
+  function removeSession(id) {
+    try {
+      store.remove(id);
+    } catch (err) {
+      log.warn('落盘失败', { sessionId: id, message: errMessage(err) });
+    }
+  }
+
   // 等到队列真正稳定：任务执行过程中可能又追加新任务，不能只 await 一次快照
   async function drainWork() {
     let prev;
@@ -314,7 +324,7 @@ function createManager({
       spawn(record);
     } catch (err) {
       sessions.delete(record.id);
-      store.remove(record.id);
+      removeSession(record.id);
       log.error('会话启动失败', { sessionId: record.id, message: errMessage(err) });
       await api.sendCard(chatId, cards.errorCard({
         title: '启动失败',
@@ -351,7 +361,7 @@ function createManager({
       spawn(record);
     } catch (err) {
       sessions.delete(record.id);
-      store.remove(record.id);
+      removeSession(record.id);
       const message = errMessage(err);
       log.error('会话启动失败', { sessionId: record.id, message });
       try {

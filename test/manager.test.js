@@ -367,6 +367,35 @@ test('createFromPc：spawn 抛错 → 回滚记录、解散空群并抛错', asy
   assert.ok(calls.some((c) => c[0] === 'disbandChat' && c[1] === 'oc_new'));
 });
 
+test('createFromPhone：spawn 失败后回滚落盘抛错 → 仍然回启动失败红卡', async () => {
+  const log = fakeLog();
+  const { manager, store, calls } = setup({ spawnThrows: true, log });
+  // 真实 store.remove 先改内存再 save()，这里同样先删再抛
+  store.remove = (id) => {
+    store.map.delete(id);
+    throw new Error('磁盘满了');
+  };
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 一' });
+  assert.strictEqual(rec, null);
+  const cardCall = calls.find((c) => c[0] === 'sendCard');
+  assert.strictEqual(cardCall[2].header.title.content, '启动失败');
+  assert.ok(JSON.stringify(cardCall[2]).includes('pty 启动失败'));
+  assert.ok(log.warns.some(([m]) => m === '落盘失败'));
+});
+
+test('createFromPc：spawn 失败后回滚落盘抛错 → 仍然解散空群并抛会话启动失败', async () => {
+  const { manager, store, calls } = setup({ spawnThrows: true });
+  store.remove = (id) => {
+    store.map.delete(id);
+    throw new Error('磁盘满了');
+  };
+  await assert.rejects(
+    () => manager.createFromPc({ cwd: 'D:/card', alias: '卡牌' }),
+    /会话启动失败/,
+  );
+  assert.ok(calls.some((c) => c[0] === 'disbandChat' && c[1] === 'oc_new'));
+});
+
 test('onPhoneMessage：未登记的群把首句当作建会话指令', async () => {
   const { manager, store, spawned } = setup();
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '卡牌 加个技能', senderOpenId: 'ou_me' });
