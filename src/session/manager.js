@@ -233,12 +233,19 @@ function createManager({
       booting.delete(chatId);
       const record = store.getByChat(chatId);
       const ps = record && sessions.get(record.id);
+      const extras = texts.filter((extra) => extra && (extra.text || extra.media));
       if (ps) {
-        for (const extra of texts) {
-          if (!extra || (!extra.text && !extra.media)) continue;
+        for (const extra of extras) {
           // 接待期间发来的附件也得下载落盘再补投，否则会话只收到一句正文，图就丢了
           const withMedia = extra.media ? await attachMedia(chatId, extra.text || '', extra.media) : extra.text;
           if (withMedia) ps.submitText(withMedia, 'phone');
+        }
+      } else if (extras.length) {
+        // 会话没建起来（路径不对、启动失败），攒下的消息无处可去：得说一声，不能悄悄吞掉
+        try {
+          await api.sendText(chatId, `会话没建起来，刚才连发的 ${extras.length} 条消息没能送进去，重新发一次吧。`);
+        } catch (err) {
+          log.warn('补投失败提示发不出去', { chatId, message: errMessage(err) });
         }
       }
     }

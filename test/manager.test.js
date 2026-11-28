@@ -1407,6 +1407,28 @@ test('无头接待期间连发两条：只建一个会话，后续消息补投�
   assert.ok(texts.includes('顺便加个测试'));
 });
 
+test('无头接待期间连发的消息：会话没建起来时不能悄悄丢掉，要回一条提示', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const { manager, calls } = setup({
+    fsApi: { existsSync: (p) => p !== 'Q:/nope', mkdirSync() {} },
+    apiOverrides: {
+      async sendCard(chatId, card) { calls.push(['sendCard', chatId, card]); await gate; },
+    },
+  });
+
+  const first = manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: 'Q:/nope 干活' });
+  await new Promise((r) => setImmediate(r));
+  const second = manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '顺便加个测试' });
+  release();
+  const [r1, r2] = await Promise.all([first, second]);
+
+  assert.strictEqual(r1, null);
+  assert.strictEqual(r2, null);
+  const text = calls.filter((c) => c[0] === 'sendText').map((c) => c[2]);
+  assert.ok(text.some((t) => t.includes('没能送进去')), `连发的消息被悄悄丢了：${JSON.stringify(calls)}`);
+});
+
 test('规则 path-missing：发错误卡，不调无头', async () => {
   let called = 0;
   const { manager, calls, spawned } = setup({
