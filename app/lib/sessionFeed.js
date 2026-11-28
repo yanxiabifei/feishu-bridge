@@ -15,6 +15,9 @@ function createSessionFeed({ now = () => Date.now() } = {}) {
     // 选中一个会话：调用方随后把返回的消息发出去
     select(id) {
       selectedId = id;
+      // 先拿列表里的那条顶上，否则切换会话后 selected 还挂着上一个会话，
+      // 标题/详情会一直显示旧会话直到 daemon 推来新的 session 消息
+      selected = sessions.find((s) => s.id === id) || null;
       replayDone = false;
       lastOutputAt = 0;
       return { type: 'attach', sessionId: id };

@@ -1,4 +1,6 @@
 // 项目选择器的数据：最近使用的目录（会话表 + 别名的并集），默认目录，其余靠用户手选。
+const { toMs } = require('./format');
+
 const RECENT_LIMIT = 5;
 
 const dirName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || '';
@@ -16,7 +18,8 @@ function buildPicker({ projects = {}, sessions = [], limit = RECENT_LIMIT } = {}
   for (const s of sessions) {
     if (!s || !s.cwd) continue;
     const prev = byCwd.get(s.cwd);
-    const at = Number(s.lastActiveAt || s.createdAt || 0);
+    // 记录里的时间是 ISO 字符串，Number() 会得到 NaN，排序就全乱了
+    const at = toMs(s.lastActiveAt || s.createdAt || 0);
     if (!prev || at > prev.at) {
       byCwd.set(s.cwd, { at, agent: s.agent || null, alias: s.alias || null });
     }

@@ -107,3 +107,27 @@ test('client：close() 之后不再重连，send 返回 false', async (t) => {
   assert.strictEqual(client.send({ type: 'list' }), false);
   assert.strictEqual(calls.client.length, 0);
 });
+
+test('client：reconnect 关闭时 daemon 断开直接落到 closed，不会卡在 connecting', async (t) => {
+  const { ipc } = await boot(t);
+  const states = [];
+  const client = createDaemonClient({
+    WebSocketImpl: WebSocket,
+    url: `ws://127.0.0.1:${ipc.port}/?token=tok-app`,
+    log,
+    reconnect: false,
+    minBackoffMs: 20,
+    maxBackoffMs: 40,
+    onTransportChange: (s) => states.push(s),
+  });
+  t.after(() => client.close());
+  client.connect();
+  await waitFor(() => client.state === 'open', '没连上');
+
+  // 关掉 daemon 这一侧，模拟对端消失
+  await ipc.close();
+  await waitFor(() => client.state === 'closed', '断开后状态没落到 closed');
+  await new Promise((r) => setTimeout(r, 150));
+  assert.strictEqual(client.state, 'closed');
+  assert.ok(!states.includes('connecting') || states.lastIndexOf('closed') > states.lastIndexOf('connecting'));
+});

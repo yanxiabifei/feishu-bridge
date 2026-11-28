@@ -1,8 +1,20 @@
 const pad = (n) => String(n).padStart(2, '0');
 
+// 会话记录里的时间是 ISO 字符串（daemon 的 newRecord 写的是 toISOString()），
+// 不是毫秒数；只认 number 的话，真实数据的时间戳全部被当成「没有」。
+function toMs(ts) {
+  if (typeof ts === 'number') return Number.isFinite(ts) && ts > 0 ? ts : 0;
+  if (typeof ts === 'string' && ts) {
+    const n = Date.parse(ts);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  return 0;
+}
+
 function mmddhhmm(ts) {
-  if (!Number.isFinite(ts) || ts <= 0) return '';
-  const d = new Date(ts);
+  const ms = toMs(ts);
+  if (!ms) return '';
+  const d = new Date(ms);
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
@@ -27,4 +39,4 @@ function formatSyncLine({ session, at = Date.now(), state = 'synced' } = {}) {
   return parts.join(' · ');
 }
 
-module.exports = { formatTitle, formatSyncLine, mmddhhmm };
+module.exports = { formatTitle, formatSyncLine, mmddhhmm, toMs };

@@ -7,7 +7,7 @@ const path = require('node:path');
 const { readEndpoint, buildWsUrl } = require('../app/lib/endpoint');
 const { buildPicker } = require('../app/lib/pickerModel');
 const { createSessionFeed } = require('../app/lib/sessionFeed');
-const { formatTitle, formatSyncLine } = require('../app/lib/format');
+const { formatTitle, formatSyncLine, mmddhhmm } = require('../app/lib/format');
 
 function tmpDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-app-'));
@@ -55,6 +55,24 @@ test('picker：近期目录按最后活动排序，别名表优先，默认目�
   assert.deepStrictEqual(out.agents, ['claude', 'codex']);
 });
 
+test('picker：会话记录里的 ISO 时间字符串也能正确排序', () => {
+  const out = buildPicker({
+    projects: {},
+    sessions: [
+      { id: 'a', cwd: 'D:/old', agent: 'claude', createdAt: '2026-11-20T10:00:00.000Z' },
+      { id: 'b', cwd: 'D:/new', agent: 'codex', createdAt: '2026-11-22T10:00:00.000Z' },
+      {
+        id: 'c',
+        cwd: 'D:/mid',
+        agent: 'claude',
+        createdAt: '2026-11-01T10:00:00.000Z',
+        lastActiveAt: '2026-11-21T10:00:00.000Z',
+      },
+    ],
+  });
+  assert.deepStrictEqual(out.recent.map((r) => r.cwd), ['D:/new', 'D:/mid', 'D:/old']);
+});
+
 test('sessionFeed：replay 到达前的实时输出被丢弃，之后才写入', () => {
   const feed = createSessionFeed();
   assert.deepStrictEqual(feed.select('s1'), { type: 'attach', sessionId: 's1' });
@@ -83,10 +101,31 @@ test('sessionFeed：session 推来后更新列表与当前会话，错误转成�
   ]);
 });
 
+test('sessionFeed：切换会话后不再挂着上一个会话的详情', () => {
+  const feed = createSessionFeed();
+  feed.select('s1');
+  feed.handle({ type: 'sessions', list: [{ id: 's1', alias: '旧' }, { id: 's2', alias: '新' }] });
+  feed.handle({ type: 'session', session: { id: 's1', alias: '旧' } });
+  assert.strictEqual(feed.getState().selected.alias, '旧');
+
+  feed.select('s2');
+  assert.strictEqual(feed.getState().selectedId, 's2');
+  assert.strictEqual(feed.getState().selected.id, 's2');
+  assert.strictEqual(feed.getState().selected.alias, '新');
+});
+
 test('format：窗口标题与底部状态栏', () => {
   const at = new Date('2026-11-23T21:40:00').getTime();
   assert.strictEqual(formatTitle({ alias: '卡牌', cwd: 'D:/x', createdAt: at }), '卡牌 · 11-23 21:40');
   assert.strictEqual(formatTitle({ cwd: 'D:/x/blog' }), 'blog');
   assert.strictEqual(formatSyncLine({ session: { alias: '卡牌' }, at }), '已同步 · 卡牌 · 11-23 21:40');
   assert.strictEqual(formatSyncLine({ session: { alias: '卡牌' }, state: 'reconnecting', at }), '重连中 · 卡牌 · 11-23 21:40');
+});
+
+test('format：会话记录里的 ISO 时间字符串也能进标题与状态栏', () => {
+  const iso = '2026-11-23T21:40:00';
+  assert.strictEqual(formatTitle({ alias: '卡牌', createdAt: iso }), '卡牌 · 11-23 21:40');
+  assert.strictEqual(formatSyncLine({ session: { alias: '卡牌' }, at: iso }), '已同步 · 卡牌 · 11-23 21:40');
+  assert.strictEqual(mmddhhmm('不是时间'), '');
+  assert.strictEqual(mmddhhmm(0), '');
 });

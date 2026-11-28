@@ -77,6 +77,13 @@ function createDaemonClient({
         setState('closed');
         return;
       }
+      // 关掉重连时没有下一次连接，状态只能是 closed；
+      // 继续置 connecting 会让界面永远显示「连接中」
+      if (!reconnect) {
+        setState('closed');
+        emit({ type: 'transport', state: 'closed', at: now() });
+        return;
+      }
       setState('connecting');
       emit({ type: 'transport', state: 'closed', at: now() });
       scheduleReconnect();
