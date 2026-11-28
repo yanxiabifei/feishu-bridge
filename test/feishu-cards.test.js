@@ -17,6 +17,18 @@ test('truncate：超限时保留头尾并标注截断', () => {
   assert.ok(r.text.startsWith('AAAA'));
 });
 
+test('转义后再截断：满是 < 的长回复也不超长度上限', () => {
+  // 每个 < 转义成 &#60; 会翻 5 倍；先截断再转义，8000 字上限就形同虚设
+  const c = cards.replyCard({ text: '<'.repeat(9000) });
+  const body = c.body.elements[0].content;
+  assert.ok(body.includes('&#60;'), '仍需转义');
+  assert.ok(body.length <= cards.MAX_CARD_CHARS + 100, `正文 ${body.length} 字，超过上限`);
+
+  const s = cards.screenCard({ text: '<'.repeat(9000), reason: 'not-ready' });
+  const screen = s.body.elements[2].content;
+  assert.ok(screen.length <= 6000 + 100, `画面 ${screen.length} 字，超过上限`);
+});
+
 test('所有卡片都是可序列化的 2.0 卡片', () => {
   const all = [
     cards.processingCard({ agent: 'claude', prompt: '改地形' }),

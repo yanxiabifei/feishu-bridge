@@ -43,7 +43,7 @@ function processingCard({ agent, prompt }) {
     title: '⏳ 正在处理…',
     template: 'blue',
     elements: elements(
-      md(escapeText(truncate(prompt || '（无输入）', 2000).text)),
+      md(truncate(escapeText(prompt || '（无输入）'), 2000).text),
       { tag: 'hr' },
       footer({ agent }),
     ),
@@ -51,12 +51,13 @@ function processingCard({ agent, prompt }) {
 }
 
 function replyCard({ text, agent, cwd }) {
-  const { text: body, truncated } = truncate(text || '（空回复）');
+  // 先转义再截断：转义会把 < 变成 5 个字符，反过来做会让最终卡片超出长度上限
+  const { text: body, truncated } = truncate(escapeText(text || '（空回复）'));
   return card({
     title: truncated ? '✅ 回复（已截断）' : '✅ 回复',
     template: 'green',
     elements: elements(
-      md(escapeText(body)),
+      md(body),
       truncated ? note('内容过长已截断，完整输出请到电脑上看。') : null,
       footer({ agent, cwd }),
     ),
@@ -73,7 +74,7 @@ function screenCard({ text, reason }) {
     elements: elements(
       md(why),
       { tag: 'hr' },
-      md('```\n' + neutralizeFences(escapeText(truncate(text || '（无画面）', 6000).text)) + '\n```'),
+      md('```\n' + neutralizeFences(truncate(escapeText(text || '（无画面）'), 6000).text) + '\n```'),
       {
         tag: 'button',
         text: { tag: 'plain_text', content: '仍然发送' },
@@ -89,7 +90,7 @@ function noticeCard({ title, text, template = 'grey' }) {
   return card({
     title,
     template,
-    elements: elements(text ? md(escapeText(truncate(text).text)) : null),
+    elements: elements(text ? md(truncate(escapeText(text)).text) : null),
   });
 }
 
@@ -97,7 +98,7 @@ function errorCard({ title, text }) {
   return card({
     title,
     template: 'red',
-    elements: elements(text ? md(escapeText(truncate(text).text)) : null),
+    elements: elements(text ? md(truncate(escapeText(text)).text) : null),
   });
 }
 
@@ -107,7 +108,7 @@ function screenOutputCard({ lead, text, agent, cwd }) {
     template: 'turquoise',
     elements: elements(
       lead ? md(escapeText(lead)) : null,
-      md('```\n' + neutralizeFences(escapeText(truncate(text || '（无画面）', 6000).text)) + '\n```'),
+      md('```\n' + neutralizeFences(truncate(escapeText(text || '（无画面）'), 6000).text) + '\n```'),
       {
         tag: 'button',
         text: { tag: 'plain_text', content: '查看完整画面' },
@@ -123,7 +124,7 @@ function fullScreenCard({ text, lines }) {
   return card({
     title: `🖥 最近 ${lines} 行`,
     template: 'turquoise',
-    elements: elements(md('```\n' + neutralizeFences(escapeText(truncate(text || '（无画面）', 6000).text)) + '\n```')),
+    elements: elements(md('```\n' + neutralizeFences(truncate(escapeText(text || '（无画面）'), 6000).text) + '\n```')),
   });
 }
 
