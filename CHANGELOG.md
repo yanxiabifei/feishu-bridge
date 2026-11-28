@@ -2,6 +2,12 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.5] - 2026-11-28
+
+### 文档
+
+- SECURITY.md 把 `npm run check:logs` 的描述改准：它用本机保存的 App Secret 和当前环境里的 `ANTHROPIC_AUTH_TOKEN` 做精确匹配、扫描 `logs/` 下的日志，不是按「凭据形态」做模式识别；读不到凭据或没有配置时会报错/跳过，不算通过。
+
 ## [0.2.4] - 2026-11-28
 
 ### 修复
