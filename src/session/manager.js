@@ -136,6 +136,15 @@ function createManager({
     }
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
     if (e.type === 'overflow') log.warn('队列已满', { sessionId: e.sessionId });
+    if (e.type === 'queue-dropped' && !shuttingDown) {
+      const dropped = Array.isArray(e.items) ? e.items : [];
+      if (dropped.length) {
+        // 会话进程退出时还排在队列里的消息没人再写了，手机那边必须知道，
+        // 否则它只见过「已排队」，以为发出去了。
+        enqueueWork(() => api.sendText(record.chatId, `排队里的 ${dropped.length} 条消息没能送进去（会话进程退出了），重新发一次吧。`)
+          .catch((err) => log.warn('排队丢失提示发送失败', { chatId: record.chatId, message: errMessage(err) })));
+      }
+    }
   }
 
   function spawn(record) {
@@ -403,6 +412,9 @@ function createManager({
     if (payload.session_id) record.claudeSessionId = payload.session_id;
     if (payload.transcript_path) record.transcriptPath = payload.transcript_path;
     if (!['error', 'closed', 'closing'].includes(record.status)) record.status = 'idle';
+    // 本轮归属必须在 releaseTurn 之前取：releaseTurn 会同步把队列里的下一条写进去并派发
+    // turn-start，那一笔会立刻覆盖 turnInputs，取晚了回复就挂到下一句提问上了。
+    const input = turnInputs.get(record.id) || record.lastInput;
     // ptySession 内部状态也要回到 idle，否则 canWrite 永远为 false，队列里的手机消息再也写不进去
     const stoppedPs = sessions.get(record.id);
     if (stoppedPs) stoppedPs.releaseTurn();
@@ -410,7 +422,6 @@ function createManager({
     store.save();
     ipc?.broadcast({ type: 'session', session: record });
 
-    const input = turnInputs.get(record.id) || record.lastInput;
     if (input && !String(input.text || '').trim()) {   // 只按了回车，不推
       await finalizePendingCard(record, '本轮只按了回车，没有别的输入。');
       return;

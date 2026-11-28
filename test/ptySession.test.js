@@ -16,6 +16,7 @@ function harness(overrides = {}) {
   let ready = true;
   let clock = 1000;
   let killCalls = 0;
+  let disposeCalls = 0;
 
   const pty = {
     pid: 4242,
@@ -23,7 +24,11 @@ function harness(overrides = {}) {
     onExit(fn) { exitHandler = fn; },
     write(s) { written.push(s); },
     resize(c, r) { resized.push([c, r]); },
-    kill() { killCalls++; exitHandler({ exitCode: 0 }); },
+    kill() {
+      killCalls++;
+      if (overrides.killThrows) throw new Error('kill boom');
+      exitHandler({ exitCode: 0 });
+    },
   };
 
   const screen = {
@@ -35,7 +40,7 @@ function harness(overrides = {}) {
     inInputBox: () => inBox,
     bracketedPaste: (t) => `\x1b[200~${t}\x1b[201~`,
     resize(c, r) { screenResized.push([c, r]); },
-    dispose() {},
+    dispose() { disposeCalls += 1; },
   };
   let lastScreen = '';
   let inBox = true;
@@ -64,6 +69,7 @@ function harness(overrides = {}) {
   return {
     ps, written, events, resized, screenResized, order, session, launchCalls, factoryCalls,
     get killCalls() { return killCalls; },
+    get disposeCalls() { return disposeCalls; },
     screenText() { return lastScreen; },
     setReady(v) { ready = v; },
     setInBox(v) { inBox = v; },
@@ -795,4 +801,73 @@ test('电脑回车（没起回合）也会刷新看门狗计时', () => {
   h.setNow(100000 + 179000);
   h.ps._pollReady();
   assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0);
+});
+
+// ---- 启动就卡死：进程一个字节都不输出，isReady 永远不会成立 ----
+
+test('启动后一直没有输出，超时后报错并结束，不会永远卡在 starting', () => {
+  const h = harness();
+  h.setReady(false);
+  h.ps.start();
+  assert.strictEqual(h.ps.status, 'starting');
+
+  h.setNow(1000 + 119000);   // 还没到两分钟
+  h.ps._pollReady();
+  assert.strictEqual(h.ps.status, 'starting');
+
+  h.setNow(1000 + 120000);
+  h.ps._pollReady();
+  assert.strictEqual(h.ps.status, 'closed', '无输出超时后必须止损，否则队列永远堵着');
+  const errs = h.events.filter((e) => e.type === 'error');
+  assert.strictEqual(errs.length, 1);
+  assert.ok(errs[0].message.includes('没有任何输出'));
+  assert.strictEqual(h.events.filter((e) => e.type === 'exit').length, 1);
+});
+
+test('启动后有过输出就按正常启动等待，不触发无输出止损', () => {
+  const h = harness();
+  h.setReady(false);
+  h.ps.start();
+  h.emitData('正在加载');
+
+  h.setNow(1000 + 200000);
+  h.ps._pollReady();
+  assert.strictEqual(h.ps.status, 'starting');
+});
+
+// ---- 进程退出时排队中的消息不能静默消失 ----
+
+test('进程退出时排队中的消息以 queue-dropped 上报，不再静默丢弃', () => {
+  const h = harness();
+  h.ps.start();
+  h.ps.submitText('一', 'phone');
+  h.ps.submitText('二', 'phone');
+  h.emitExit(0);
+
+  const dropped = h.events.filter((e) => e.type === 'queue-dropped');
+  assert.strictEqual(dropped.length, 1);
+  assert.deepStrictEqual(dropped[0].items.map((i) => i.text), ['一', '二']);
+  assert.strictEqual(h.ps.status, 'closed');
+});
+
+test('后台结束进程时排队中的消息同样上报', () => {
+  const h = harness();
+  h.ps.start();
+  h.ps.submitText('一', 'phone');
+  h.ps.kill();
+
+  const dropped = h.events.filter((e) => e.type === 'queue-dropped');
+  assert.strictEqual(dropped.length, 1);
+  assert.deepStrictEqual(dropped[0].items.map((i) => i.text), ['一']);
+});
+
+// ---- pty.kill 自己抛错也不能把收尾流程打断 ----
+
+test('pty.kill 抛错时 kill 仍然发出 exit 并释放屏幕', () => {
+  const h = harness({ killThrows: true });
+  h.ps.start();
+  assert.doesNotThrow(() => h.ps.kill());
+  assert.strictEqual(h.ps.status, 'closed');
+  assert.strictEqual(h.events.filter((e) => e.type === 'exit').length, 1);
+  assert.strictEqual(h.disposeCalls, 1, '屏幕必须释放，否则 xterm 的定时器会泄漏');
 });

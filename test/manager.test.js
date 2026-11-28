@@ -606,6 +606,32 @@ test('Stop：电脑来源顶部带 🖥 行', async () => {
   assert.ok(body.includes('十点半。'));
 });
 
+test('Stop：releaseTurn 同步泵出下一条时，回复仍挂在原来那句电脑提问上', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'pc-input', input: { seq: 2, origin: 'pc', text: '现在几点', at: 2 } });
+  // 本轮还没结束时手机又发来一条，它排在队列里
+  spawned[0].emit({ type: 'input', input: { seq: 3, origin: 'phone', text: '顺便跑个测试', at: 3 } });
+  // 真实 ptySession 的 releaseTurn 会同步把队列里的下一条写进去并派发新的 turn-start，
+  // 那一笔会立刻覆盖 turnInputs；Stop 里的归属必须在调用 releaseTurn 之前就读出来。
+  spawned[0].releaseTurn = () => spawned[0].emit({ type: 'turn-start', seq: 3, origin: 'phone', text: '顺便跑个测试' });
+
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '十点半。' } });
+
+  const body = JSON.stringify(calls.filter((c) => c[0] === 'sendCard').at(-1)[2].body);
+  assert.ok(body.includes('🖥 你刚在电脑上问：现在几点'), '回复必须挂在电脑上问的那句后面');
+  assert.ok(!body.includes('顺便跑个测试'), '下一条消息不能显示成本轮提问');
+});
+
+test('会话进程退出时排队丢失的消息会提示重新发送', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'queue-dropped', items: [{ seq: 2, origin: 'phone', text: '一' }, { seq: 3, origin: 'phone', text: '二' }] });
+  await manager._drain();
+
+  const sent = calls.filter((c) => c[0] === 'sendText').map((c) => c[2]);
+  assert.ok(sent.includes('排队里的 2 条消息没能送进去（会话进程退出了），重新发一次吧。'));
+  assert.strictEqual(rec.id, spawned[0].session.id);
+});
+
 test('Stop：输入为空（只按了回车）不推', async () => {
   const { manager, calls, spawned, rec } = await started();
   const before = calls.filter((c) => c[0] === 'sendCard').length;

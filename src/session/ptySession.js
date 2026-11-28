@@ -7,6 +7,9 @@ const CODEX_SETTLE_POLLS = 3;     // 静默稳定连续 3 次探测（200ms × 3
 // 没有这条看门狗会话会永远卡在 running，手机消息再也写不进去。
 // 三轮多完全无输出、画面回到输入框，就按「回合已结束」处理。
 const IDLE_GUARD_MS = 180000;
+// 进程起来后一个字节都不输出：isReady 永远等不到，队列会永远堵在这里，
+// 手机那边只会看到消息一直「已发送」。超时后必须止损。
+const START_DEADLINE_MS = 120000;
 
 // 宿主自己跑在 Claude Code 里时（从终端里 `npm start` 就是这种情况），环境会带一串
 // 会话标记；传给子 claude 会让它认为自己是子会话，打出「Transcript saving is off」，
@@ -44,6 +47,7 @@ function createPtySession({
   let runningSince = 0;
   let settlePolls = 0;
   let lastActivityAt = 0;   // 最后一次有 PTY 输出或写入的时间，看门狗用
+  let startDeadlineAt = 0;  // 启动后一直没输出的止损线
 
   const screen = screenFactory({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
   const emit = (e) => onEvent({ sessionId: session.id, ...e });
@@ -65,6 +69,14 @@ function createPtySession({
     if (exitEmitted) return;
     exitEmitted = true;
     emit({ type: 'exit', code, signal });
+  }
+
+  // 会话结束时排队还没写进去的消息不会再发出去了，必须让上层知道，
+  // 否则手机那边只收到过「已排队」，以为消息已经送进去了。
+  function dropQueue() {
+    const dropped = queue.drain();
+    if (dropped.length) emit({ type: 'queue-dropped', items: dropped });
+    return dropped;
   }
 
   // 写入一次输入：先进入 running，pty 抛错则回滚到 idle 再抛出，
@@ -96,11 +108,18 @@ function createPtySession({
   function pollReady() {
     if (disposed || status === 'closed') return;
     if (status === 'starting') {
-      if (!screen.isReady()) return;
-      status = 'idle';
-      session.status = 'idle';
-      emit({ type: 'ready' });
-      queue.release();
+      if (screen.isReady()) {
+        status = 'idle';
+        session.status = 'idle';
+        emit({ type: 'ready' });
+        queue.release();
+        return;
+      }
+      // 一个字节都没有输出过，isReady 永远不会成立：到点止损，别让队列一直堵着
+      if (lastActivityAt === 0 && now() >= startDeadlineAt) {
+        emit({ type: 'error', message: '会话进程长时间没有任何输出，已经停掉了。回复「重来」再试。' });
+        kill();
+      }
       return;
     }
     if (status === 'idle' && queue.pending() > 0 && !queue.inFlight()) {
@@ -131,7 +150,7 @@ function createPtySession({
     status = 'closed';
     session.status = 'closed';
     disposed = true;
-    queue.drain();
+    dropQueue();
     // node-pty 在子进程自然退出后不会自己 dispose：windowsTerminal.js:97-100 的
     // socket close 只调 _close()，从不调 WindowsPtyAgent.kill()；而 conout Worker
     // 的 dispose() 只存在于 WindowsPtyAgent.kill() 内部（windowsPtyAgent.js:151），
@@ -148,6 +167,7 @@ function createPtySession({
 
   function start() {
     if (pty || disposed) return;
+    startDeadlineAt = now() + START_DEADLINE_MS;
     const l = launch(session);
     pty = ptyFactory(l.file, l.args, {
       name: 'xterm-256color',
@@ -233,8 +253,13 @@ function createPtySession({
     disposed = true;
     status = 'closed';
     clearReadyTimer();
-    queue.drain();
-    if (pty) pty.kill();
+    dropQueue();
+    const p = pty;
+    pty = null;
+    // pty 可能已经在退出过程中，kill 自己抛错不能把后面的收尾（exit/屏幕释放）全跳过
+    if (p) {
+      try { p.kill(); } catch { /* 已经退出 */ }
+    }
     emitExitOnce(0);
     disposeScreen();
   }
