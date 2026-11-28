@@ -224,6 +224,19 @@ async function createDaemon({ deps = {} } = {}) {
           .catch((err) => log.warn('卡片动作处理失败', { chatId: a.chatId, message: errText(err) }));
       },
     },
+    // 长连接进了终态就不会再自己重连，手机发来的消息再也进不来。
+    // HTTP 通道通常还活着，主动推一条，免得「以为桥还在，其实没人听」。
+    onTerminal: async (err) => {
+      if (!config.ownerChatId) return;
+      try {
+        await api.sendText(
+          config.ownerChatId,
+          `⚠️ 飞书长连接已断开且不再自动重连：${errText(err)}\n在本机重新运行 npm start 恢复。`,
+        );
+      } catch (sendErr) {
+        log.warn('断线通知发送失败', { message: errText(sendErr) });
+      }
+    },
   });
 
   let timer = null;

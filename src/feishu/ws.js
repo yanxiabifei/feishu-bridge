@@ -41,6 +41,7 @@ function createFeishuWs({
   log,
   dedup,
   domain,
+  onTerminal,
 }) {
   const Lark = sdk || require('@larksuiteoapi/node-sdk');
   log = log ?? {};
@@ -97,10 +98,28 @@ function createFeishuWs({
     appSecret,
     loggerLevel: Lark.LoggerLevel.fatal,
     domain,
+    // SDK 只在「重试也救不回来」时才回调 onError（凭据被拒、重连次数耗尽）。
+    // 之后它不会再自己连，不喊一声的话守护进程会一直跑着但收不到任何消息。
+    onError: (err) => {
+      const message = errText(err);
+      log?.error?.(`ws 长连接已放弃重连（SDK 终态）：${message}`);
+      try {
+        onTerminal?.(err);
+      } catch (e) {
+        log?.warn?.(`ws: onTerminal 处理失败：${errText(e)}`);
+      }
+    },
   });
 
   return {
-    start: () => client.start({ eventDispatcher: dispatcher }),
+    start: async () => {
+      // SDK 自己只检查格式、写一句日志就 return，调用方会以为连上了。
+      // 这里的 App ID 是唯一的凭据入口，格式不对永远连不上，直接报错更好。
+      if (!/^cli_[0-9a-fA-F]{16}$/.test(String(appId || ''))) {
+        throw new Error('飞书 App ID 格式不对（应为 cli_ 加 16 位十六进制），请检查 config.json');
+      }
+      return client.start({ eventDispatcher: dispatcher });
+    },
     close: () => client.close(),
     // 旧版 SDK 没有 getConnectionStatus，拿不到就返回 null，由调用方显示「未知」
     status: () => (typeof client.getConnectionStatus === 'function'

@@ -410,6 +410,40 @@ test('巡检节奏：长连接正常 30 秒一查，断线降到 5 秒，恢复�
   await daemon.stop();
 });
 
+test('长连接终态断开：主动给主人发提醒，别让桥悄悄变聋', async () => {
+  const { deps, calls } = makeDeps();
+  await createDaemon({ deps });
+
+  assert.strictEqual(typeof calls.wsOpts.onTerminal, 'function');
+  await calls.wsOpts.onTerminal(new Error('reconnect exhausted'));
+
+  assert.strictEqual(calls.text.length, 1);
+  assert.strictEqual(calls.text[0][0], 'oc_own');
+  assert.match(calls.text[0][1], /长连接/);
+  assert.match(calls.text[0][1], /reconnect exhausted/);
+});
+
+test('没有 ownerChatId 时断线提醒静默跳过', async () => {
+  const { deps, calls } = makeDeps({ loadConfigFn: () => ({ ...CONFIG, ownerChatId: '' }) });
+  await createDaemon({ deps });
+  await calls.wsOpts.onTerminal(new Error('dead'));
+  assert.strictEqual(calls.text.length, 0);
+});
+
+test('断线提醒发送失败只记日志，不冒泡', async () => {
+  const warns = [];
+  const { deps, calls } = makeDeps({
+    apiFactory: () => ({ sendText: async () => { throw new Error('http down'); } }),
+    logger: () => ({
+      info() {}, error() {}, redactor: { add() {} },
+      warn: (m) => { warns.push(String(m)); },
+    }),
+  });
+  await createDaemon({ deps });
+  await calls.wsOpts.onTerminal(new Error('dead'));
+  assert.ok(warns.some((m) => m.includes('断线通知')));
+});
+
 test('main：已有实例在跑就直接退出，不再装配', async () => {
   const h = makeDeps({
     fsApi: fakeFs({ ipcExists: true, content: JSON.stringify({ port: 51000, pid: 999 }) }),

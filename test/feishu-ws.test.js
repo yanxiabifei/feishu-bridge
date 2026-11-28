@@ -34,7 +34,9 @@ function setup(extra = {}) {
     appId: 'cli_0123456789abcdef',
     appSecret: 'sec',
     sdk,
-    log: { error: (m) => logs.push(m), info: () => {}, debug: () => {} },
+    log: {
+      error: (m) => logs.push(m), warn: (m) => logs.push(m), info: () => {}, debug: () => {},
+    },
     handlers: {
       onMessage: (d) => { calls.message.push(d); },
       onDisbanded: (d) => { calls.disbanded.push(d); },
@@ -65,6 +67,29 @@ test('start 传入 dispatcher；客户端静默日志', async () => {
   assert.strictEqual(state.clientOpts.appId, 'cli_0123456789abcdef');
   assert.strictEqual(state.clientOpts.loggerLevel, 0);
   assert.strictEqual(state.clientOpts.domain, 0);
+});
+
+// SDK 的 start() 遇到 App ID 格式不对时只往自己的 logger 写一句就 return，
+// 守护进程会以为连上了，实际永远收不到消息。这里必须让它当场炸掉。
+test('App ID 格式不对时 start 直接报错，不留下「跑着但听不见」的守护进程', async () => {
+  const s = setup({ appId: 'not-a-feishu-app-id' });
+  await assert.rejects(() => s.ws.start(), /App ID 格式不对/);
+  assert.strictEqual(s.state.startArgs, null, '格式都不对就不该去连');
+});
+
+test('SDK 判定不可恢复（onError）时写错误日志并回调 onTerminal', () => {
+  const terminals = [];
+  const { state, logs } = setup({ onTerminal: (err) => terminals.push(err) });
+  assert.strictEqual(typeof state.clientOpts.onError, 'function');
+  state.clientOpts.onError(new Error('tenant token invalid'));
+  assert.ok(logs.some((m) => m.includes('长连接') && m.includes('tenant token invalid')));
+  assert.strictEqual(terminals.length, 1);
+});
+
+test('onTerminal 自己抛错不会冒泡', () => {
+  const throwing = setup({ onTerminal: () => { throw new Error('notify boom'); } });
+  assert.doesNotThrow(() => throwing.state.clientOpts.onError(new Error('dead')));
+  assert.ok(throwing.logs.some((m) => m.includes('notify boom')));
 });
 
 test('status：透传 SDK 长连接状态；旧版 SDK 没有该方法时返回 null', () => {
