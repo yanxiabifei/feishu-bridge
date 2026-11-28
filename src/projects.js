@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const { writeJsonAtomic } = require('./store');
+const { ALIAS_MAX } = require('./session/router');
 
 // 读 state/projects.json；文件不存在或 JSON 损坏都退回默认值，绝不抛错
 function loadProjects({ file, defaultCwd }) {
@@ -28,6 +29,8 @@ function renameAlias({ file, from, to }) {
   const name = String(to || '').trim();
   if (!name) return { ok: false, message: '新别名不能为空。' };
   if (/\s/.test(name)) return { ok: false, message: '新别名不能带空格。' };
+  // 与 router 的扫描上限保持一致：超长的名字改成功也永远命不中，等于白改
+  if (name.length > ALIAS_MAX) return { ok: false, message: `新别名最多 ${ALIAS_MAX} 个字符。` };
 
   let doc;
   try {

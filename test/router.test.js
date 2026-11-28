@@ -121,3 +121,25 @@ test('句首 codex 后面跟中文/标点仍能识别', () => {
   assert.strictEqual(r.agent, 'codex');
   assert.strictEqual(r.prompt, '，写个快排');
 });
+
+test('7 个字的别名也能命中：改名上限放宽后路由要跟得上', () => {
+  const alias = '飞书桥接项目组';
+  const r = parseFirstMessage(`${alias} 改个文档`, {
+    ...base,
+    aliases: { [alias]: 'D:/feishu-bridge' },
+  });
+  assert.strictEqual(r.source, 'alias');
+  assert.strictEqual(r.cwd, 'D:/feishu-bridge');
+  assert.strictEqual(r.prompt, '改个文档');
+});
+
+test('20 个字的别名（上限）也能命中', () => {
+  const alias = '一二三四五六七八九十一二三四五六七八九十';
+  assert.strictEqual(Array.from(alias).length, 20);
+  const r = parseFirstMessage(`${alias} 开工`, {
+    ...base,
+    aliases: { [alias]: 'D:/x' },
+  });
+  assert.strictEqual(r.source, 'alias');
+  assert.strictEqual(r.prompt, '开工');
+});

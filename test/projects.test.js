@@ -89,3 +89,20 @@ test('renameAlias：新别名是 __proto__ 也不会丢数据', () => {
   assert.strictEqual(Object.getOwnPropertyDescriptor(doc.aliases, '__proto__').value, 'D:/card');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('renameAlias：新别名超过 20 个字符就拒绝，20 个字符正好放行', () => {
+  const dir = tmpDir();
+  const file = path.join(dir, 'projects.json');
+  const original = JSON.stringify({ aliases: { 卡牌: 'D:/card' } });
+  fs.writeFileSync(file, original);
+
+  const long = renameAlias({ file, from: '卡牌', to: 'x'.repeat(21) });
+  assert.strictEqual(long.ok, false);
+  assert.match(long.message, /最多 20/);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), original);
+
+  const edge = renameAlias({ file, from: '卡牌', to: 'y'.repeat(20) });
+  assert.strictEqual(edge.ok, true);
+  assert.deepStrictEqual(Object.keys(edge.aliases), ['y'.repeat(20)]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

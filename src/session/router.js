@@ -1,5 +1,6 @@
 const SEP = /^[\s,，:：、]+/;
-const ALIAS_MAX = 6;
+// 别名最长多少字：改名校验和这里的分词扫描必须用同一个数，否则改完的名字用不上
+const ALIAS_MAX = 20;
 
 // 「用 codex」「走 codex」「codex：」这类明确指名才算，正文里顺口提到不算
 const AGENT_LEAD = /^\s*codex(?![A-Za-z0-9_-])\s*(?:模式)?\s*[:：]?\s*/i;
@@ -46,4 +47,4 @@ function parseFirstMessage(text, { aliases = {}, defaultCwd, exists = () => fals
   return withAgent({ cwd: defaultCwd, alias: null, prompt: raw, source: 'default' });
 }
 
-module.exports = { parseFirstMessage };
+module.exports = { parseFirstMessage, ALIAS_MAX };
