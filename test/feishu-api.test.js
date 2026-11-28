@@ -317,6 +317,50 @@ test('取 token 同样带超时，避免所有请求一起卡死', async () => {
   await assert.rejects(() => api.getToken(), /飞书请求超时/);
 });
 
+const tokenOkRes = {
+  ok: true,
+  status: 200,
+  json: async () => ({ code: 0, msg: 'ok', tenant_access_token: 't-1', expire: 7200 }),
+  text: async () => '',
+  arrayBuffer: async () => Buffer.from(''),
+};
+
+// 超时信号也可能在响应头之后、读响应体时触发：此时抛的是裸 TimeoutError，
+// 日志里看不到「飞书请求超时」，得和请求阶段一样换成中文错误。
+function bodyTimeout() {
+  const err = new Error('The operation was aborted due to timeout');
+  err.name = 'TimeoutError';
+  return Promise.reject(err);
+}
+
+test('响应体读取超时也换成中文错误，不把裸 TimeoutError 抛给上层', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).includes('tenant_access_token')) return tokenOkRes;
+    return {
+      ok: true,
+      status: 200,
+      json: bodyTimeout,
+      text: bodyTimeout,
+      arrayBuffer: bodyTimeout,
+    };
+  };
+  const api = createApi({ appId: 'cli_x', appSecret: 'sec', fetchImpl, requestTimeoutMs: 20 });
+  await assert.rejects(() => api.sendText('oc_1', '你好'), /飞书请求超时（0 秒）/);
+  await assert.rejects(() => api.downloadResource('om_1', 'fk_1', 'file'), /飞书请求超时/);
+});
+
+test('token 响应体读取超时同样换成中文错误', async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: bodyTimeout,
+    text: bodyTimeout,
+    arrayBuffer: bodyTimeout,
+  });
+  const api = createApi({ appId: 'cli_x', appSecret: 'sec', fetchImpl, requestTimeoutMs: 20 });
+  await assert.rejects(() => api.getToken(), /飞书请求超时/);
+});
+
 test('默认超时是 15 秒，两个入口都带上 AbortSignal', async () => {
   const { api, calls } = apiWith(({ url }) => (
     tokenRoute(url) || { code: 0, msg: 'ok', data: { message_id: 'om_1' } }

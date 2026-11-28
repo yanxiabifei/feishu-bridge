@@ -34,10 +34,24 @@ function createApi({
     try {
       return await fetchImpl(url, { ...opts, signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
-      if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-        throw new Error(`飞书请求超时（${Math.round(timeoutMs / 1000)} 秒）：${new URL(url).pathname}`);
-      }
-      throw err;
+      throw toTimeoutError(err, url, timeoutMs);
+    }
+  }
+
+  // 超时信号也可能在响应头之后、读响应体时才触发，此时抛的是裸 TimeoutError：
+  // 和请求阶段一样换成中文错误，否则日志里看不出是超时。
+  function toTimeoutError(err, url, timeoutMs) {
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      return new Error(`飞书请求超时（${Math.round(timeoutMs / 1000)} 秒）：${new URL(url).pathname}`);
+    }
+    return err;
+  }
+
+  async function readBody(url, promise, timeoutMs = requestTimeoutMs) {
+    try {
+      return await promise;
+    } catch (err) {
+      throw toTimeoutError(err, url, timeoutMs);
     }
   }
 
@@ -45,12 +59,13 @@ function createApi({
     if (token && now() < tokenExp - 60000) return Promise.resolve(token);
     if (inflight) return inflight;
     inflight = (async () => {
-      const res = await callFetch(`${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
+      const url = `${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`;
+      const res = await callFetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json; charset=utf-8' },
         body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
       });
-      const json = await res.json();
+      const json = await readBody(url, res.json());
       if (json.code !== 0) {
         throw new FeishuError(json.code, json.msg, '/open-apis/auth/v3/tenant_access_token/internal');
       }
@@ -64,7 +79,8 @@ function createApi({
   async function requestOnce(method, path, { query, body, raw = false, timeoutMs } = {}) {
     const t = await getToken();
     const qs = query ? `?${new URLSearchParams(query).toString()}` : '';
-    const res = await callFetch(`${baseUrl}${path}${qs}`, {
+    const url = `${baseUrl}${path}${qs}`;
+    const res = await callFetch(url, {
       method,
       headers: {
         authorization: `Bearer ${t}`,
@@ -78,8 +94,9 @@ function createApi({
       const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
       throw new FeishuError(res.status, `HTTP ${res.status}${snippet ? ` ${snippet}` : ''}`, path);
     }
-    if (raw) return Buffer.from(await res.arrayBuffer());
-    const json = await res.json();
+    const bodyTimeoutMs = timeoutMs || requestTimeoutMs;
+    if (raw) return Buffer.from(await readBody(url, res.arrayBuffer(), bodyTimeoutMs));
+    const json = await readBody(url, res.json(), bodyTimeoutMs);
     if (json.code !== 0) throw new FeishuError(json.code, json.msg, path);
     return json.data;
   }
@@ -167,13 +184,14 @@ function createApi({
 
     getBotInfo: () => withTokenRetry(async () => {
       // bot/v3/info 把结果放在顶层 bot 字段，没有 data 包装，不能复用 request
+      const url = `${baseUrl}/open-apis/bot/v3/info`;
       const t = await getToken();
-      const res = await callFetch(`${baseUrl}/open-apis/bot/v3/info`, {
+      const res = await callFetch(url, {
         method: 'GET',
         headers: { authorization: `Bearer ${t}` },
       });
       if (!res.ok) throw new FeishuError(res.status, `HTTP ${res.status}`, '/open-apis/bot/v3/info');
-      const json = await res.json();
+      const json = await readBody(url, res.json());
       if (json.code !== 0) throw new FeishuError(json.code, json.msg, '/open-apis/bot/v3/info');
       return json.bot;
     }),
