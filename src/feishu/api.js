@@ -15,16 +15,30 @@ function createApi({
   fetchImpl = globalThis.fetch,
   baseUrl = 'https://open.feishu.cn',
   now = () => Date.now(),
+  requestTimeoutMs = 15000,
 }) {
   let token = null;
   let tokenExp = 0;
   let inflight = null;
 
+  // 飞书接口偶发不响应时，裸 fetch 会挂到 TCP 超时（几分钟），期间所有消息都堵着。
+  // 统一加超时，并换成中文错误，免得日志里只看到 AbortError。
+  async function callFetch(url, opts) {
+    try {
+      return await fetchImpl(url, { ...opts, signal: AbortSignal.timeout(requestTimeoutMs) });
+    } catch (err) {
+      if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+        throw new Error(`飞书请求超时（${Math.round(requestTimeoutMs / 1000)} 秒）：${new URL(url).pathname}`);
+      }
+      throw err;
+    }
+  }
+
   function getToken() {
     if (token && now() < tokenExp - 60000) return Promise.resolve(token);
     if (inflight) return inflight;
     inflight = (async () => {
-      const res = await fetchImpl(`${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
+      const res = await callFetch(`${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
         method: 'POST',
         headers: { 'content-type': 'application/json; charset=utf-8' },
         body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
@@ -43,7 +57,7 @@ function createApi({
   async function request(method, path, { query, body, raw = false } = {}) {
     const t = await getToken();
     const qs = query ? `?${new URLSearchParams(query).toString()}` : '';
-    const res = await fetchImpl(`${baseUrl}${path}${qs}`, {
+    const res = await callFetch(`${baseUrl}${path}${qs}`, {
       method,
       headers: {
         authorization: `Bearer ${t}`,
@@ -128,7 +142,7 @@ function createApi({
     getBotInfo: async () => {
       // bot/v3/info 把结果放在顶层 bot 字段，没有 data 包装，不能复用 request
       const t = await getToken();
-      const res = await fetchImpl(`${baseUrl}/open-apis/bot/v3/info`, {
+      const res = await callFetch(`${baseUrl}/open-apis/bot/v3/info`, {
         method: 'GET',
         headers: { authorization: `Bearer ${t}` },
       });

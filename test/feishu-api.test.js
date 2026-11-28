@@ -253,3 +253,40 @@ test('token 在恰好 tokenExp - 60000 时刷新（边界）', async () => {
   await api.sendText('oc_1', 'b');
   assert.strictEqual(calls.filter((c) => c.url.includes('tenant_access_token')).length, 2);
 });
+
+// 模拟「服务端不响应」：没有超时信号就一直挂着，有则在 abort 时拒绝
+function hangingFetch() {
+  return (url, opts = {}) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('没有超时信号，请求一直挂着')), 300);
+    if (opts.signal) {
+      opts.signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(opts.signal.reason);
+      }, { once: true });
+    }
+  });
+}
+
+test('每个请求都带超时信号，服务端不响应也不会一直挂着', async () => {
+  const api = createApi({
+    appId: 'cli_x', appSecret: 'sec', fetchImpl: hangingFetch(), requestTimeoutMs: 20,
+  });
+  await assert.rejects(() => api.sendText('oc_1', '你好'), /飞书请求超时/);
+});
+
+test('取 token 同样带超时，避免所有请求一起卡死', async () => {
+  const api = createApi({
+    appId: 'cli_x', appSecret: 'sec', fetchImpl: hangingFetch(), requestTimeoutMs: 20,
+  });
+  await assert.rejects(() => api.getToken(), /飞书请求超时/);
+});
+
+test('默认超时是 15 秒，两个入口都带上 AbortSignal', async () => {
+  const { api, calls } = apiWith(({ url }) => (
+    tokenRoute(url) || { code: 0, msg: 'ok', data: { message_id: 'om_1' } }
+  ));
+  await api.sendText('oc_1', '你好');
+  await api.getBotInfo();
+  assert.ok(calls.length >= 3);
+  for (const c of calls) assert.ok(c.opts.signal instanceof AbortSignal, `缺 signal：${c.url}`);
+});
