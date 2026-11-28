@@ -377,6 +377,31 @@ test('onPhoneMessage：非主人的消息一律忽略', async () => {
   assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, 1); // 只有「已开工」
 });
 
+test('onPhoneMessage：缺 senderOpenId 时按陌生人处理，不 fail-open', async () => {
+  const { manager, spawned } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: 'rm -rf', senderOpenId: null });
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: 'rm -rf', senderOpenId: '' });
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: 'rm -rf' });
+  assert.strictEqual(spawned[0].submitted.length, 0);
+});
+
+test('onPhoneMessage：ownerOpenId 为空时谁也不能建会话', async () => {
+  const { manager, store, spawned } = setup({ configOverrides: { ownerOpenId: '' } });
+  await manager.onPhoneMessage({ chatId: 'oc_9', text: '卡牌 建个会话', senderOpenId: 'ou_me' });
+  assert.strictEqual(spawned.length, 0);
+  assert.strictEqual(store.all().length, 0);
+});
+
+test('onCardAction：openId 为空或不是主人时一律忽略', async () => {
+  const { manager, spawned } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  await manager.onCardAction({ chatId: 'oc_1', openId: '', action: { act: 'force-send' } });
+  await manager.onCardAction({ chatId: 'oc_1', action: { act: 'full-screen' } });
+  await manager.onCardAction({ chatId: 'oc_1', openId: 'ou_other', action: { act: 'force-send' } });
+  assert.strictEqual(spawned[0].submitted.length, 0);
+});
+
 test('onPhoneMessage：队列满时提示积压', async () => {
   const { manager, spawned, calls } = setup();
   await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });

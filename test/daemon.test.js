@@ -129,6 +129,12 @@ test('缺凭据：报错并提示先跑 setup', async () => {
   assert.strictEqual(noAppId.calls.ipcOpts, null);
 });
 
+test('缺 ownerOpenId：启动时报错，否则群命令会对所有人开放', async () => {
+  const { deps, calls } = makeDeps({ loadConfigFn: () => ({ ...CONFIG, ownerOpenId: '' }) });
+  await assert.rejects(() => createDaemon({ deps }), /ownerOpenId/);
+  assert.strictEqual(calls.ipcOpts, null, '校验失败时不能把守护进程拉起来');
+});
+
 test('装配：密钥进 redactor，store 先加载，各工厂拿到正确参数', async () => {
   const { deps, calls } = makeDeps();
   const daemon = await createDaemon({ deps });

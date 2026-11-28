@@ -51,6 +51,11 @@ async function createDaemon({ deps = {} } = {}) {
   const secretStore = secretStoreFactory({ file: pathsApi.SECRET, log });
   const appSecret = secretStore.load();
   if (!config.appId || !appSecret) throw new Error('缺少飞书凭据：先运行 npm run setup');
+  // ownerOpenId 空着时，manager/control 的守卫没法分辨「谁是你」，群里的任何人都能指挥本机。
+  // 宁可起不来，也不能悄悄对所有人开放。
+  if (!config.ownerOpenId) {
+    throw new Error('缺少 ownerOpenId：没有它分不清消息是不是你发的，先运行 npm run setup 补齐配置');
+  }
   log.redactor?.add(appSecret);
 
   const startedAt = Date.now();

@@ -5,7 +5,9 @@ const {
   parseControl, formatSessions, formatHealth, createControl,
 } = require('../src/control');
 
-function harness({ sessions = [], aliases = { 卡牌: 'D:/card' }, rename, getHealth } = {}) {
+function harness({
+  sessions = [], aliases = { 卡牌: 'D:/card' }, rename, getHealth, ownerOpenId = 'ou_me',
+} = {}) {
   const calls = [];
   const renames = [];
   const api = {
@@ -18,7 +20,7 @@ function harness({ sessions = [], aliases = { 卡牌: 'D:/card' }, rename, getHe
     closeSession: async (id, opts) => { calls.push(['close', id, opts]); },
     getProjects: () => ({ aliases, default: 'D:/w' }),
     renameAlias: (args) => { renames.push(args); return rename ? rename(args) : { ok: true }; },
-    ownerOpenId: 'ou_me',
+    ownerOpenId,
     getHealth,
   });
   return { control, calls, renames };
@@ -283,4 +285,13 @@ test('结束：当前别名优先于会话记录里的旧别名，不误关另�
     ['close', 's2', { reason: '手机总控面板关闭', notify: true }],
     ['close', 's1', { reason: '手机总控面板关闭', notify: true }],
   ]);
+});
+
+test('ownerOpenId 为空：面板不响应任何人（fail-closed）', async () => {
+  const { control, calls } = harness({ ownerOpenId: '' });
+  await control.onMessage({ chatId: 'oc_p2p', text: '列表', senderOpenId: '' });
+  await control.onMessage({ chatId: 'oc_p2p', text: '列表', senderOpenId: 'ou_me' });
+  await control.onCardAction({ chatId: 'oc_p2p', openId: '', action: { act: 'alias-rename', from: '卡牌' } });
+  await control.onBotAdded({ chatId: 'oc_1', openId: '' });
+  assert.deepStrictEqual(calls, []);
 });

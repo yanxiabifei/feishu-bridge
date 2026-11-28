@@ -164,7 +164,7 @@ function createControl({ api, listSessions, closeSession, getProjects, renameAli
   }
 
   async function onMessage({ chatId, text, senderOpenId }) {
-    if (senderOpenId !== ownerOpenId) return;
+    if (!ownerOpenId || senderOpenId !== ownerOpenId) return;
     const body = String(text || '').trim();
 
     const pendingFrom = pending.get(chatId);
@@ -217,7 +217,7 @@ function createControl({ api, listSessions, closeSession, getProjects, renameAli
   }
 
   async function onCardAction({ chatId, openId, action }) {
-    if (openId !== ownerOpenId) return;
+    if (!ownerOpenId || openId !== ownerOpenId) return;
     if (!action || action.act !== 'alias-rename') return;
     const { aliases } = getProjects() || {};
     if (!action.from || !aliases || aliases[action.from] === undefined) {
@@ -229,7 +229,7 @@ function createControl({ api, listSessions, closeSession, getProjects, renameAli
   }
 
   async function onBotAdded({ chatId, openId }) {
-    if (openId !== ownerOpenId) return;
+    if (!ownerOpenId || openId !== ownerOpenId) return;
     await api.sendCard(chatId, card({
       title: '👋 我是终端桥',
       template: 'green',

@@ -588,13 +588,13 @@ function createManager({
   }
 
   async function onCardAction({ chatId, openId = null, action }) {
-    if (config.ownerOpenId && openId && openId !== config.ownerOpenId) {
+    if (!config.ownerOpenId || !openId || openId !== config.ownerOpenId) {
       log.warn('忽略非主人的卡片操作', { chatId });
       return;
     }
     const act = action && action.act;
     if (act === 'force-send') {
-      await onPhoneMessage({ chatId, text: '仍然发送', senderOpenId: openId || config.ownerOpenId });
+      await onPhoneMessage({ chatId, text: '仍然发送', senderOpenId: openId });
       return;
     }
     if (act === 'full-screen') {
@@ -788,7 +788,8 @@ function createManager({
   async function onPhoneMessage({
     chatId, text, media = null, senderOpenId = null,
   }) {
-    if (config.ownerOpenId && senderOpenId && senderOpenId !== config.ownerOpenId) {
+    // 缺 owner 或缺发送者时一律 fail-closed：宁可漏掉一条，也不能让陌生人指挥本机
+    if (!config.ownerOpenId || !senderOpenId || senderOpenId !== config.ownerOpenId) {
       log.warn('忽略非主人的消息', { chatId });
       return;
     }
