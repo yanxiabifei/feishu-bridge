@@ -18,6 +18,7 @@ A real terminal runs on your PC. The daemon owns the PTY, so your phone sees the
 - **Start from your phone**: create a group, add the bot, `@bot <alias> <task>`, and a new session starts on the PC.
 - **See the same screen**: the “current screen” card is the terminal itself, not a summary.
 - **Run projects in parallel**: one group per project, no cross-talk.
+- **Desktop mirror window**: an Electron window on the PC shows the same terminal; closing it just hides it to the tray, and a new group from your phone pops it up within ~3 seconds. Optional autostart.
 - **DM control panel**: `列表` to list sessions, `结束 <alias>` to close, `改名 <old> <new>` to rename.
 - **In-place reply cards**: “working” first, updated with the answer on the same card.
 
@@ -25,7 +26,7 @@ A real terminal runs on your PC. The daemon owns the PTY, so your phone sees the
 
 Most bridges turn the conversation into Feishu cards: you see words, not the terminal. Here the daemon owns the PTY, so the phone receives the actual byte stream from the terminal process — no relaying, no summarising.
 
-> It does **not** attach to a `claude` you already started in a console; it only manages sessions it started. The desktop mirror window (Plan B) is not built yet — the IPC layer is ready, the client is not.
+> It does **not** attach to a `claude` you already started in a console; it only manages sessions it started. The desktop mirror window ships with the app — see step 4 under “How to use”.
 >
 > Single-instance daemon; App Secret encrypted with Windows DPAPI.
 
@@ -33,7 +34,7 @@ Most bridges turn the conversation into Feishu cards: you see words, not the ter
 
 **Yes** if you keep Claude Code / Codex running on a Windows box and want to hand it tasks while away from the keyboard.
 
-**No** if you want a desktop mirror window (not implemented), use macOS/Linux (untested), or are uncomfortable with "one chat message → arbitrary command execution on my machine".
+**No** if you use macOS/Linux (untested), or are uncomfortable with "one chat message → arbitrary command execution on my machine".
 
 ## How to use
 
@@ -57,6 +58,15 @@ Just hand it to an AI 🤣～
    ```
 
 3. DM the bot `列表` (list) to see sessions. Add the bot to a group, then `@bot <alias> <task>`.
+
+4. Want the same screen on the PC as well (optional):
+
+   ```bash
+   npm run window   # dev mode: start the window directly
+   npm run pack     # or build a portable dist/feishu-bridge-win32-x64/feishu-bridge.exe
+   ```
+
+   Closing a window only hides it to the tray; the tray menu has “open picker / autostart / quit”. A new group from your phone makes the window pop up automatically. **Autostart and “the daemon can launch the window when it is offline” only fully work in the packaged build** — dev mode never touches the registry and the autostart checkbox is greyed out.
 
 ## Read before use
 

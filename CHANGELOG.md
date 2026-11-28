@@ -2,6 +2,14 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.5] - 2026-11-28
+
+### 文档
+
+- README 补上桌面窗口：能干什么新增「电脑端镜像窗口」，怎么用新增第 4 步（`npm run window` / `npm run pack`、关窗只收托盘、托盘菜单、手机建群自动弹窗，并注明开机自启与离线拉起只在打包版完整生效）；删掉「Plan B 还没做」的过期说明。`README.en.md` 同步。
+- `ROADMAP.md`：「桌面端镜像窗口（Plan B）」「守护进程开机自启」标为完成，中期不再列 Plan B。
+- Plan B 计划文档顶部加状态行，指向验收清单与架构文档。
+
 ## [0.3.4] - 2026-11-28
 
 ### 新增

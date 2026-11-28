@@ -1,5 +1,7 @@
 # Plan B 电脑端镜像窗口 实现计划
 
+> **状态（2026-11-28）：** 已按本计划实现，随 0.3.0–0.3.4 发布。下面的复选框是当初的进度留痕，未逐条回填；实际验收见 [`docs/acceptance.md`](../../acceptance.md)，代码现状见 [`docs/architecture.md`](../../architecture.md)。
+
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
 **目标：** 双击图标选目录和 agent，弹出一个贴着群名的终端窗口，与手机群共享同一个会话；关窗口不结束会话，结束会话先确认。
