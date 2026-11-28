@@ -66,3 +66,20 @@ test('落盘后文件被外部删除，再次 load 返回空表', () => {
   assert.deepStrictEqual(s.all(), []);
   fs.rmSync(path.dirname(file), { recursive: true, force: true });
 });
+
+test('带 BOM 的 sessions.json 正常读回，不当成损坏文件清空', () => {
+  const file = tmpFile();
+  fs.writeFileSync(file, '﻿' + JSON.stringify({ sessions: [{ id: 's1', chatId: 'oc_1' }] }));
+  const s = createStore({ file }).load();
+  assert.deepStrictEqual(s.all().map((x) => x.id), ['s1']);
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+});
+
+test('损坏文件挪不走（rename 失败）也不抛错，照常返回空表', () => {
+  const file = tmpFile();
+  fs.writeFileSync(file, '{broken');
+  const warns = [];
+  const s = createStore({ file, log: { warn: (ev, f) => warns.push({ ev, f }) } }).load();
+  assert.deepStrictEqual(s.all(), []);
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+});

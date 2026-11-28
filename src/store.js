@@ -19,13 +19,20 @@ function createStore({ file, log }) {
         data = { sessions: [] };
         return this;
       }
-      const raw = fs.readFileSync(file, 'utf8');
+      let raw = fs.readFileSync(file, 'utf8');
+      // 记事本另存为 UTF-8 会带 BOM，不剥掉会当成损坏文件把会话全清空
+      if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
       try {
         data = JSON.parse(raw);
       } catch {
         const backup = `${file}.corrupt-${Date.now()}`;
-        fs.renameSync(file, backup);
-        if (log) log.warn('store.corrupt', { file, backup });
+        try {
+          fs.renameSync(file, backup);
+          if (log) log.warn('store.corrupt', { file, backup });
+        } catch (err) {
+          // 挪不走（被占用/只读）就当没有：已经读到内存里了，照常重建空表
+          if (log) log.warn('store.corrupt_rename_failed', { file, error: String((err && err.message) || err) });
+        }
         data = { sessions: [] };
       }
       if (!data || typeof data !== 'object' || !Array.isArray(data.sessions)) data = { sessions: [] };

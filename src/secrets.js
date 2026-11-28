@@ -38,14 +38,42 @@ function createSecretStore({ file, runner = runPowerShell, acl = restrictAcl, lo
         record = { mode: 'plain', data: b64 };
       }
       fs.mkdirSync(require('node:path').dirname(file), { recursive: true });
-      fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600 });
+      const write = () => fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600 });
+      try {
+        write();
+      } catch (err) {
+        // 明文模式的 ACL 把文件设成「只读」后再覆盖就会被拒；先放开权限再写一次
+        if (err && (err.code === 'EACCES' || err.code === 'EPERM')) {
+          fs.chmodSync(file, 0o600);
+          write();
+        } else {
+          throw err;
+        }
+      }
       if (record.mode === 'plain') acl(file);
       return record.mode;
     },
     load() {
       if (!fs.existsSync(file)) return null;
-      const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
-      const b64 = rec.mode === 'dpapi' ? runner(PS_UNPROTECT, rec.data) : rec.data;
+      let rec;
+      try {
+        rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+      } catch {
+        // 原始 SyntaxError 对用户毫无意义，也看不出该删哪个文件
+        throw new Error(`飞书凭据文件损坏：${file}，删除后重新运行 npm run setup`);
+      }
+      if (!rec || typeof rec.data !== 'string' || !rec.data) {
+        throw new Error(`飞书凭据文件内容不完整：${file}，删除后重新运行 npm run setup`);
+      }
+      let b64;
+      try {
+        b64 = rec.mode === 'dpapi' ? runner(PS_UNPROTECT, rec.data) : rec.data;
+      } catch (err) {
+        throw new Error(
+          `飞书凭据解密失败（DPAPI，可能与当前 Windows 用户不同或文件被改过）：${file}，`
+          + `删除后重新运行 npm run setup（原始错误：${String((err && err.message) || err)}）`,
+        );
+      }
       return Buffer.from(b64, 'base64').toString('utf8');
     },
   };

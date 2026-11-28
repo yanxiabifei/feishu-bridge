@@ -27,7 +27,22 @@ const DEFAULTS = {
 
 function loadConfig(file) {
   let raw = {};
-  if (fs.existsSync(file)) raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (fs.existsSync(file)) {
+    let text = fs.readFileSync(file, 'utf8');
+    // 记事本另存为 UTF-8 会带 BOM，JSON.parse 直接报 Unexpected token
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new Error(
+        `配置文件格式错误：${file}（${String((err && err.message) || err)}），`
+        + '请修正该文件或删除后重新运行 npm run setup',
+      );
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`配置文件内容不是 JSON 对象：${file}，请修正或删除后重新运行 npm run setup`);
+    }
+  }
   return { ...structuredClone(DEFAULTS), ...raw };
 }
 

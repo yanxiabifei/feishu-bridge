@@ -32,6 +32,18 @@ test('createRedactor 在任意字符串里替换已登记的字面量', () => {
   assert.strictEqual(r.scrub('nothing here'), 'nothing here');
 });
 
+test('日志文件写不进去时（磁盘/权限/同名目录）不抛错，daemon 不受影响', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-log-'));
+  fs.mkdirSync(path.join(dir, '2026-11-23.jsonl')); // 同路径是目录，appendFileSync 必抛 EISDIR
+  const log = createLogger({ dir, now: () => new Date('2026-11-23T13:00:00Z') });
+  assert.doesNotThrow(() => {
+    log.info('boot', {});
+    log.warn('slow', {});
+    log.error('boom', {});
+  });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('createLogger 写 JSONL，一行一条，且不含密钥字面量', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-log-'));
   const log = createLogger({ dir, now: () => new Date('2026-11-23T13:00:00Z') });

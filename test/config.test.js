@@ -49,3 +49,22 @@ test('saveConfig 原子写，可被 loadConfig 读回', (t) => {
   assert.strictEqual(loadConfig(file).appId, 'cli_2');
   assert.deepStrictEqual(fs.readdirSync(dir), ['config.json']);
 });
+
+test('带 BOM 的 config.json 也能读（记事本另存为的常见产物）', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-cfg-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, '﻿{"appId":"cli_bom"}');
+  assert.strictEqual(loadConfig(file).appId, 'cli_bom');
+});
+
+test('config.json 写坏了报中文错误并提示修好或重新 setup', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-cfg-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, '{broken');
+  assert.throws(() => loadConfig(file), /配置文件格式错误.*npm run setup/s);
+
+  fs.writeFileSync(file, '[1,2]');
+  assert.throws(() => loadConfig(file), /不是 JSON 对象/);
+});

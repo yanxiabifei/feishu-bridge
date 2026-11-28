@@ -44,10 +44,20 @@ function redact(value, redactor = createRedactor(), depth = 0) {
 function createLogger({ dir, redactor = createRedactor(), now = () => new Date() }) {
   fs.mkdirSync(dir, { recursive: true });
   const write = (level, event, fields) => {
-    const ts = now().toISOString();
-    const rec = { ts, level, event, ...redact(fields || {}, redactor) };
-    fs.appendFileSync(path.join(dir, `${ts.slice(0, 10)}.jsonl`), JSON.stringify(rec) + '\n');
-    if (level !== 'info') process.stderr.write(`[${level}] ${event}\n`);
+    try {
+      const ts = now().toISOString();
+      const rec = { ts, level, event, ...redact(fields || {}, redactor) };
+      fs.appendFileSync(path.join(dir, `${ts.slice(0, 10)}.jsonl`), JSON.stringify(rec) + '\n');
+    } catch {
+      // 磁盘满 / 无权限 / 同路径是目录：日志写不进去绝不能把 daemon 一起带走
+    }
+    if (level !== 'info') {
+      try {
+        process.stderr.write(`[${level}] ${event}\n`);
+      } catch {
+        /* stderr 也断了就算了 */
+      }
+    }
   };
   return {
     redactor,
