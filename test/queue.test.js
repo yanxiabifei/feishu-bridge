@@ -101,14 +101,24 @@ test('drain 只清空排队项，不影响在途', () => {
   assert.deepStrictEqual(written, ['turn-1', 'turn-3']);
 });
 
-test('write 抛异常时不把队列卡死，交给 onError', () => {
+test('write 抛异常时不把队列卡死，消息留队重试而不是静默丢掉', () => {
   const errors = [];
+  const written = [];
+  let fail = true;
   const q = createQueue({
     canWrite: () => true,
-    write: () => { throw new Error('boom'); },
+    write: (x) => { if (fail) throw new Error('boom'); written.push(x); },
     onError: (e) => errors.push(e.message),
   });
   q.push('a');
   assert.deepStrictEqual(errors, ['boom']);
   assert.strictEqual(q.inFlight(), false);
+  // 已经在 pump 里 shift 出来的那条必须放回去：进程退出时 dropQueue 才能把它
+  // 一起报给用户，进程还活着也能在下一轮重试
+  assert.strictEqual(q.pending(), 1);
+
+  fail = false;
+  q.release();
+  assert.deepStrictEqual(written, ['a']);
+  assert.strictEqual(q.pending(), 0);
 });

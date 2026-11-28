@@ -268,7 +268,7 @@ function throwingHarness() {
   return { ps, written, events, session, emitExit(code) { exitHandler({ exitCode: code }); } };
 }
 
-test('PTY 写入抛错时回滚状态、派发 error，随后仍能正常提交', () => {
+test('PTY 写入抛错时回滚状态、派发 error，失败的那条留在队列里重试而不是丢掉', () => {
   const h = throwingHarness();
   h.ps.start(); h.ps._pollReady();
 
@@ -277,8 +277,17 @@ test('PTY 写入抛错时回滚状态、派发 error，随后仍能正常提交'
   assert.strictEqual(h.ps.status, 'idle');
   assert.strictEqual(h.session.status, 'idle');
 
+  // write 抛错的那条必须还在队列里：下一次轮询恢复写入时先补发它
+  h.ps._pollReady();
+  assert.deepStrictEqual(h.written, ['\x1b[200~会失败\x1b[201~\r']);
+  assert.strictEqual(h.ps.status, 'running');
+
+  h.ps.releaseTurn();
   h.ps.submitText('会成功', 'phone');
-  assert.deepStrictEqual(h.written, ['\x1b[200~会成功\x1b[201~\r']);
+  assert.deepStrictEqual(h.written, [
+    '\x1b[200~会失败\x1b[201~\r',
+    '\x1b[200~会成功\x1b[201~\r',
+  ]);
   assert.strictEqual(h.ps.status, 'running');
 });
 

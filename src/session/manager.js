@@ -215,13 +215,13 @@ function createManager({
     }
   }
 
-  async function createFromPhone({ chatId, chatName, text, agent = 'claude' }) {
+  async function createFromPhone({ chatId, chatName, text, media = null, agent = 'claude' }) {
     if (store.getByChat(chatId)) {
       throw new Error('这个群已经有会话了，直接在群里发消息就行');
     }
     // 无头接待要跑几秒，这段时间里连发的消息先攒着，建好会话后补投
     if (booting.has(chatId)) {
-      booting.get(chatId).texts.push(text);
+      booting.get(chatId).texts.push({ text, media });
       return null;
     }
     booting.set(chatId, { texts: [] });
@@ -235,7 +235,10 @@ function createManager({
       const ps = record && sessions.get(record.id);
       if (ps) {
         for (const extra of texts) {
-          if (extra) ps.submitText(extra, 'phone');
+          if (!extra || (!extra.text && !extra.media)) continue;
+          // 接待期间发来的附件也得下载落盘再补投，否则会话只收到一句正文，图就丢了
+          const withMedia = extra.media ? await attachMedia(chatId, extra.text || '', extra.media) : extra.text;
+          if (withMedia) ps.submitText(withMedia, 'phone');
         }
       }
     }
@@ -410,12 +413,27 @@ function createManager({
     const pending = record.pendingCard;
     if (!pending || !pending.cardId) return;
     record.pendingCard = null;
+    const entity = card || cards.replyCard({ text, agent: record.agent, cwd: record.cwd });
     try {
-      await api.updateCardEntity(pending.cardId, card || cards.replyCard({ text, agent: record.agent, cwd: record.cwd }), pending.seq + 1);
+      try {
+        await api.updateCardEntity(pending.cardId, entity, pending.seq + 1);
+      } catch (first) {
+        // 网络抖一下（尤其 15 秒超时）就原地重试一次，和 Stop 定稿的路径保持一致
+        log.warn('处理中卡片收尾失败，原地重试一次', {
+          cardId: pending.cardId, chatId: record.chatId, message: String((first && first.message) || first),
+        });
+        await api.updateCardEntity(pending.cardId, entity, pending.seq + 1);
+      }
     } catch (err) {
-      log.warn('处理中卡片收尾失败', {
+      // 只 warn 的话群里那张卡会永远转圈，比多出一张重复卡更糟：兜底新发一张
+      log.warn('处理中卡片收尾失败，改为新发一张', {
         cardId: pending.cardId, chatId: record.chatId, message: String((err && err.message) || err),
       });
+      try {
+        await api.sendCard(record.chatId, entity);
+      } catch (e) {
+        log.warn('兜底卡片发送失败', { chatId: record.chatId, message: String((e && e.message) || e) });
+      }
     }
     // 收尾前的 save 仍带着 pendingCard，这里补一次把已清空的状态落盘
     saveSession(record);
@@ -496,6 +514,8 @@ function createManager({
   }
 
   async function notifyCrash(record, e) {
+    // 排队期间用户可能已经发「重来」把会话拉起来了：这时再报崩溃只会误导。
+    if (record.status !== 'error') return;
     const code = typeof e.code === 'number' ? `（code ${e.code}）` : '';
     const text = `会话进程异常退出${code}。\n\n回复「重来」，我用 --resume 接着干。`;
     // 本轮那张「处理中」卡还在转圈：就地定稿成错误卡，别再额外发一张，
@@ -559,6 +579,11 @@ function createManager({
     record.closedReason = reason;
     record.closedAt = new Date(now()).toISOString();
     store.save();
+    // 本轮那张「处理中」卡已经没人会来定稿了：就地收尾，别让群里永远转圈。
+    // 主动关闭 / 被解散不是崩溃，标题不能写成「进程异常退出」。
+    await finalizePendingCard(record, '', cards.errorCard({
+      title: '会话已结束', text: '这个会话已经停了，回复「重来」可以重新开一轮。',
+    }));
     ipc?.broadcast({ type: 'session', session: record });
 
     if (notify) {
@@ -595,8 +620,12 @@ function createManager({
       return false;
     }
 
+    // 上一轮那张「处理中」卡已经没人会来定稿了：先摘下来，等新进程起来后补一刀。
+    // 同时自增轮次号，作废旧进程还在飞行中的建卡任务，别让它挂到新会话上。
+    const stale = record.pendingCard;
     record.status = 'starting';
     record.pendingCard = null;
+    record.turnSeq = (record.turnSeq || 0) + 1;
     record.lastActiveAt = new Date(now()).toISOString();
     record.resuming = record.agent === 'claude' && Boolean(record.claudeSessionId);
     store.save();
@@ -614,6 +643,7 @@ function createManager({
       }
       ipc?.broadcast({ type: 'session', session: record });
       log.error('会话重启失败', { sessionId: record.id, message: errMessage(err) });
+      await closeOrphanCard(record, stale, '会话中断了，这一轮没有结果。');
       try {
         await api.sendCard(record.chatId, cards.errorCard({
           title: '会话起不来',
@@ -626,6 +656,7 @@ function createManager({
     }
     ipc?.broadcast({ type: 'session', session: record });
 
+    await closeOrphanCard(record, stale, '会话中断了，这一轮没有结果。');
     await api.sendText(record.chatId, record.resuming ? '重新开起来了，接着上次的对话。' : '重新开起来了。');
     return true;
   }
@@ -689,6 +720,10 @@ function createManager({
       record.status = 'interrupted';
       record.ptyPid = null;
       restored += 1;
+      // 上次进程可能不是正常退出，本轮那张卡没来得及定稿：启动时补一刀
+      await finalizePendingCard(record, '', cards.errorCard({
+        title: '电脑重启了', text: '这一轮没有跑完。回一条消息我就接上。',
+      }));
       try {
         await api.sendText(record.chatId, '电脑重启了，回一条消息我就接上。');
       } catch (err) {
@@ -769,6 +804,9 @@ function createManager({
     // 排队期间会话可能已被解散/移除，记录不在了就别再拉起新 PTY
     if (store.get(record.id) !== record) return;
     if (['closed', 'closing'].includes(record.status)) return;
+    // 排队期间用户可能已经回「重来」把会话拉起来了（revive 在第一个 await 前就改成
+    // starting）：再降级重建会多出一个 PTY 抢同一个群，必须让位。
+    if (record.status !== 'error') return;
     record.resuming = false;
     record.claudeSessionId = null;
     record.transcriptPath = null;
@@ -871,9 +909,13 @@ function createManager({
         await api.sendText(chatId, '那条消息已经过期了（会话重开过），把内容重新发一次吧。');
         return;
       }
+      // 只有输入框确实还被挡着才值得强写。用户已经在电脑前把菜单处理掉、这一轮正跑着时
+      // 强写会重新派发 turn-start，把当前回合的 pendingCard 冲成一张永远转圈的卡；
+      // 这时按普通消息排队，等这一轮结束自然写进去。
+      const force = ps.needsConfirm();
       let forced;
       try {
-        forced = ps.submitText(pending.text, 'phone', { force: true });
+        forced = ps.submitText(pending.text, 'phone', force ? { force: true } : undefined);
       } catch (err) {
         // 强写绕过队列，pty.write 抛错时没有 onError 兜底：不回一条消息用户以为发出去了
         log.warn('强行发送失败', { chatId, message: errMessage(err) });
@@ -882,6 +924,8 @@ function createManager({
       }
       if (forced === 'closed') {
         await api.sendText(chatId, '会话刚刚断开了，回复「重来」重新开一轮。');
+      } else if (forced === 'full') {
+        await api.sendText(chatId, `积压了 ${config.queueLimit} 条还没处理完，稍后再发。`);
       }
       return;
     }
@@ -889,7 +933,9 @@ function createManager({
 
     if (!record) {
       // 没登记过的群：首句即建会话指令（ws 层只把 @机器人 或带附件的消息转发到这里）
-      const created = await createFromPhone({ chatId, chatName: null, text, agent: config.defaultAgent || 'claude' });
+      const created = await createFromPhone({
+        chatId, chatName: null, text, media, agent: config.defaultAgent || 'claude',
+      });
       // 首条就是附件时正文是空的，会话建好后必须把附件补投进去，否则这张图就丢了
       if (created && media) {
         const withMedia = await attachMedia(chatId, '', media);

@@ -432,6 +432,36 @@ test('onPhoneMessage：回「仍然发送」强行写入上一条', async () => 
   assert.deepStrictEqual(spawned[0].submitted, [{ text: '继续', origin: 'phone', force: true }]);
 });
 
+test('onPhoneMessage：会话已经在跑时点「仍然发送」不抢写，转为正常排队', async () => {
+  const { manager, spawned } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+
+  // 输入框被菜单挡住，先暂存
+  spawned[0].confirm = true;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  // 用户已经在电脑前处理掉了菜单，这一轮正跑着：这时再强写会把当前回合的
+  // pendingCard 冲掉（turn-start 重新登记），那张卡就永远转圈。改为普通排队。
+  spawned[0].confirm = false;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
+
+  assert.deepStrictEqual(spawned[0].submitted, [{ text: '继续', origin: 'phone' }]);
+  assert.ok(!spawned[0].submitted.some((s) => s.force === true));
+});
+
+test('onPhoneMessage：护栏已解除时「仍然发送」排队满了也要提示积压', async () => {
+  const { manager, spawned, calls } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  spawned[0].confirm = true;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  spawned[0].confirm = false;
+  spawned[0].pushResult = 'full';
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
+
+  assert.ok(calls.some((c) => c[0] === 'sendText' && /积压/.test(c[2])));
+});
+
 test('onPhoneMessage：「仍然发送」强写抛错 → 提示重发，不静默吞掉', async () => {
   const { manager, spawned, calls } = setup();
   await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
@@ -1511,4 +1541,180 @@ test('--resume 失败降级重建：上一轮那张处理中卡片也要收尾�
   assert.ok(upd, '处理中的卡必须被收尾');
   assert.ok(JSON.stringify(upd).includes('这一轮没有结果'));
   assert.strictEqual(rec.pendingCard, null);
+});
+
+test('closeSession：本轮「处理中」卡片就地收尾成「会话已结束」，不留永远转圈的', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个长的' });
+  await manager._drain();
+  const pending = rec.pendingCard;
+  assert.ok(pending, '先有一张处理中卡片');
+
+  await manager.closeSession(rec.id, { notify: true });
+  await manager._drain();
+
+  const upd = calls.filter((c) => c[0] === 'updateCardEntity' && c[1] === pending.cardId).at(-1);
+  assert.ok(upd, '处理中的卡必须被就地收尾');
+  assert.ok(upd[3].header.title.content.includes('会话已结束'));
+  assert.ok(!JSON.stringify(upd[3]).includes('进程异常退出'), '主动关闭不能标成崩溃');
+});
+
+test('restoreAll：上次没跑完的「处理中」卡片就地收尾，不留转圈的', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个长的' });
+  await manager._drain();
+  const pending = rec.pendingCard;
+  assert.ok(pending);
+  manager._sessions.clear();   // 模拟 daemon 重启：内存里的 PTY 全没了
+
+  await manager.restoreAll();
+
+  const upd = calls.filter((c) => c[0] === 'updateCardEntity' && c[1] === pending.cardId).at(-1);
+  assert.ok(upd, '处理中的卡必须被就地收尾');
+  assert.ok(upd[3].header.title.content.includes('电脑重启了'));
+  assert.strictEqual(rec.pendingCard, null);
+});
+
+test('回「重来」：记录的残留「处理中」卡片也要收尾，不能一直转圈', async () => {
+  const { manager, calls, rec } = await started();
+  rec.status = 'error';
+  rec.pendingCard = { cardId: 'card_old', seq: 0, origin: 'phone', prompt: '旧的一轮' };
+
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
+
+  const upd = calls.filter((c) => c[0] === 'updateCardEntity' && c[1] === 'card_old').at(-1);
+  assert.ok(upd, '残留卡必须被收尾');
+  assert.strictEqual(rec.pendingCard, null);
+});
+
+test('崩溃通知排队期间用户已「重来」：不再补发误导的「进程异常退出」', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let cardCalls = 0;
+  const { manager, calls, spawned, rec } = await started({
+    apiOverrides: {
+      async createCardEntity(card) {
+        cardCalls += 1;
+        calls.push(['createCardEntity', card]);
+        if (cardCalls === 1) await gate;
+        return `card_${cardCalls}`;
+      },
+    },
+  });
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个长的' });
+  await new Promise((r) => setImmediate(r));
+  spawned[0].emit({ type: 'exit', code: 1 });
+  // 用户此时回「重来」：onPhoneMessage 不走工作队列，直接拉起新 PTY
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
+  assert.strictEqual(spawned.length, 2);
+  release();
+  await manager._drain();
+
+  assert.ok(!calls.some((c) => ['sendCard', 'updateCardEntity'].includes(c[0])
+    && JSON.stringify(c).includes('进程异常退出')),
+  '复活之后不能再说「进程异常退出」');
+  assert.strictEqual(rec.pendingCard, null, '上一轮在建的那张卡不能挂到复活后的会话上');
+});
+
+test('--resume 重建排队期间用户已「重来」：不再重复拉起第三个 PTY', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let cardCalls = 0;
+  const { manager, store, calls, spawned, rec } = await started({
+    apiOverrides: {
+      async createCardEntity(card) {
+        cardCalls += 1;
+        calls.push(['createCardEntity', card]);
+        if (cardCalls === 1) await gate;
+        return `card_${cardCalls}`;
+      },
+    },
+  });
+  rec.claudeSessionId = 'cs_1';
+  store.save();
+  manager._sessions.clear();
+  await manager.restoreAll();
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  spawned[1].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '继续干活' });
+  await new Promise((r) => setImmediate(r));
+  spawned[1].emit({ type: 'exit', code: 1 });   // 降级重建排在门后面
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
+
+  release();
+  await manager._drain();
+
+  assert.strictEqual(spawned.length, 3, '「重来」已经拉起新 PTY，降级重建不能再拉一个');
+  assert.strictEqual(rec.status, 'starting');
+  assert.ok(!calls.some((c) => c[0] === 'sendText' && c[2].includes('改用新会话重建')));
+});
+
+test('崩溃收尾：卡片更新失败会原地重试一次，成功就不另发一张', async () => {
+  let updateCalls = 0;
+  const { manager, calls, spawned } = await started({
+    apiOverrides: {
+      async updateCardEntity(cardId, card, seq) {
+        updateCalls += 1;
+        calls.push(['updateCardEntity', cardId, seq, card]);
+        if (updateCalls === 1) throw new Error('抖了一下');
+      },
+    },
+  });
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个长的' });
+  await manager._drain();
+  const sentBefore = calls.filter((c) => c[0] === 'sendCard').length;
+
+  spawned[0].emit({ type: 'exit', code: 3 });
+  await manager._drain();
+
+  assert.strictEqual(updateCalls, 2);
+  assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, sentBefore, '重试成功后不该多出一张卡');
+});
+
+test('崩溃收尾：原地重试仍失败就新发一张错误卡兜底，不让群里一直转圈', async () => {
+  let updateCalls = 0;
+  const { manager, calls, spawned } = await started({
+    apiOverrides: {
+      async updateCardEntity() {
+        updateCalls += 1;
+        throw new Error('一直失败');
+      },
+    },
+  });
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个长的' });
+  await manager._drain();
+
+  spawned[0].emit({ type: 'exit', code: 3 });
+  await manager._drain();
+
+  assert.strictEqual(updateCalls, 2);
+  assert.ok(calls.some((c) => c[0] === 'sendCard' && c[2].header.title.content.includes('异常退出')));
+});
+
+test('无头接待期间发来的附件：建好会话后连着附件一起补投，不能只留文字', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const downloaded = [];
+  const { manager, spawned } = setup({
+    configOverrides: { intakeEnabled: true },
+    runIntake: async () => { await gate; return { groupName: '卡牌技能', prompt: '给卡牌加一个技能' }; },
+    apiOverrides: {
+      async downloadResource(messageId, fileKey, type) {
+        downloaded.push([messageId, fileKey, type]);
+        return Buffer.from('png');
+      },
+    },
+    fsApi: { existsSync: () => true, mkdirSync() {}, writeFileSync() {} },
+  });
+  const media = { messageId: 'om_2', fileKey: 'fk_2', type: 'image', fileName: '图.png' };
+
+  const first = manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '卡牌 加个技能' });
+  await new Promise((r) => setImmediate(r));
+  const second = manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '顺手看看这张', media });
+  release();
+  await Promise.all([first, second]);
+
+  assert.deepStrictEqual(downloaded, [['om_2', 'fk_2', 'image']]);
+  const texts = spawned[0].submitted.map((s) => s.text);
+  assert.ok(texts.some((t) => t.includes('顺手看看这张') && t.includes('[附件]')));
 });
