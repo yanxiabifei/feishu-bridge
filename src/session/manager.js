@@ -1037,6 +1037,33 @@ function createManager({
     return serializeChat(args.chatId, () => handlePhoneMessage(args));
   }
 
+  // 窗口的「重来」：进程还活着就什么都不做（别为一次误点多拉一个 PTY），
+  // 记录没了就明说；错误/中断态走 revive。
+  async function restartSession(sessionId) {
+    const record = store.get(sessionId);
+    if (!record) return { ok: false, error: '会话不存在' };
+    const alive = sessions.has(sessionId)
+      && !['error', 'interrupted', 'closed', 'closing'].includes(record.status);
+    if (alive) return { ok: true };
+    const ok = await revive(record);
+    return { ok: Boolean(ok) };
+  }
+
+  // 「只关窗口」：窗口马上要销毁，这里的失败只留日志，不值得再报回去。
+  async function notifyDetached(sessionId) {
+    const record = store.get(sessionId);
+    if (!record || !sessions.has(sessionId)
+      || ['closed', 'closing', 'error', 'interrupted'].includes(record.status)) {
+      return { ok: true };
+    }
+    try {
+      await api.sendText(record.chatId, '电脑窗口已关，手机照常可发');
+    } catch (err) {
+      log.warn('窗口关闭提示发送失败', { chatId: record.chatId, message: errMessage(err) });
+    }
+    return { ok: true };
+  }
+
   return {
     createFromPhone,
     createFromPc,
@@ -1054,6 +1081,8 @@ function createManager({
     replayFor,
     list,
     shutdown,
+    restartSession,
+    notifyDetached,
     _drain: drainWork,
     _sessions: sessions,
   };

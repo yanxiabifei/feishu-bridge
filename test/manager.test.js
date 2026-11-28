@@ -1853,3 +1853,34 @@ test('补投附件时下载失败、补发的提示也发不出去：正文照�
   assert.ok(texts.some((t) => t.includes('顺手看看这张')), `补投正文丢了：${JSON.stringify(texts)}`);
   assert.ok(log.warns.some(([m]) => /附件下载失败/.test(m)));
 });
+
+test('restartSession：记录不存在报会话不存在；活着的会话不重复拉 PTY', async () => {
+  const { manager, spawned } = setup();
+  const rec = await manager.createFromPc({ cwd: 'D:/card', agent: 'claude' });
+  assert.strictEqual(spawned.length, 1);
+
+  assert.deepStrictEqual(await manager.restartSession('nope'), { ok: false, error: '会话不存在' });
+  assert.deepStrictEqual(await manager.restartSession(rec.id), { ok: true });
+  assert.strictEqual(spawned.length, 1);
+});
+
+test('restartSession：崩溃的会话原地重来，成功回 ok', async () => {
+  const { manager, spawned } = setup();
+  const rec = await manager.createFromPc({ cwd: 'D:/card', agent: 'claude' });
+  spawned[0].emit({ type: 'exit', code: 1 });
+
+  assert.deepStrictEqual(await manager.restartSession(rec.id), { ok: true });
+  assert.strictEqual(spawned.length, 2);
+});
+
+test('notifyDetached：活着的会话才往群里发一句，已结束的静默', async () => {
+  const { manager, calls } = setup();
+  const rec = await manager.createFromPc({ cwd: 'D:/card', agent: 'claude' });
+  assert.deepStrictEqual(await manager.notifyDetached(rec.id), { ok: true });
+  assert.deepStrictEqual(calls.at(-1), ['sendText', rec.chatId, '电脑窗口已关，手机照常可发']);
+
+  await manager.closeSession(rec.id, { notify: false });
+  const before = calls.length;
+  assert.deepStrictEqual(await manager.notifyDetached(rec.id), { ok: true });
+  assert.strictEqual(calls.length, before);
+});
