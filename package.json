@@ -1,6 +1,6 @@
 {
   "name": "feishu-bridge",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "description": "飞书双向 AI 终端桥：手机与本地 Claude Code / Codex 会话双向同步",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,8 @@
     "autostart": "node scripts/autostart.js",
     "test": "node --test \"test/**/*.test.js\"",
     "test:e2e": "node --test test/e2e.test.js",
-    "check:logs": "node scripts/check-logs.js"
+    "check:logs": "node scripts/check-logs.js",
+    "pack": "electron-packager . --out=dist --overwrite --asar --ignore=\"^/dist($|/)\" --ignore=\"^/docs($|/)\" --ignore=\"^/test($|/)\" --ignore=\"^/logs($|/)\" --ignore=\"^/state($|/)\" --ignore=\"^/node_modules/(node-pty|@larksuiteoapi|@xterm/headless|@xterm/addon-serialize)($|/)\""
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.77.0",
@@ -38,6 +39,7 @@
     "ws": "^8.23.0"
   },
   "devDependencies": {
+    "@electron/packager": "^20.3.1",
     "electron": "^45.5.0"
   }
 }

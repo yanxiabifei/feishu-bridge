@@ -2,6 +2,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-11-28
+
+### 新增
+
+- 桌面镜像窗口（Plan B）：`npm run window` 打开选择器，可以新建会话（选目录 + claude/codex）或接回正在跑的会话；会话窗口用 xterm 显示终端画面，列/行跟着窗口大小同步。
+- 本地通道新增 `restart`（重来）与 `detach`（只关窗口）两条消息；只关窗口时群里收到「电脑窗口已关，手机照常可发」。
+- 会话结束或被中断时窗口显示遮罩；出错/中断可直接点「重来」，会话被手机结束后窗口 3 秒自动关闭。
+- `npm run pack`：用 @electron/packager 打 Windows x64 免安装包到 `dist/`（asar，剔除只有守护进程用得到的依赖）。
+
+### 变更
+
+- 测试用例 542 个，离线运行约 9 秒。
+
 ## [0.2.5] - 2026-11-28
 
 ### 文档
