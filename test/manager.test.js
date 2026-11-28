@@ -1718,3 +1718,32 @@ test('无头接待期间发来的附件：建好会话后连着附件一起补�
   const texts = spawned[0].submitted.map((s) => s.text);
   assert.ok(texts.some((t) => t.includes('顺手看看这张') && t.includes('[附件]')));
 });
+
+test('补投附件时下载失败、补发的提示也发不出去：正文照常送进去，不把整条补投掀翻', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const log = fakeLog();
+  const { manager, spawned } = setup({
+    log,
+    configOverrides: { intakeEnabled: true },
+    runIntake: async () => { await gate; return { groupName: '卡牌技能', prompt: '给卡牌加一个技能' }; },
+    apiOverrides: {
+      async downloadResource() { throw new Error('网络断了'); },
+      async sendText(chatId, text) {
+        if (String(text).includes('附件下载失败')) throw new Error('飞书 500');
+      },
+    },
+    fsApi: { existsSync: () => true, mkdirSync() {}, writeFileSync() {} },
+  });
+  const media = { messageId: 'om_2', fileKey: 'fk_2', type: 'image', fileName: '图.png' };
+
+  const first = manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '卡牌 加个技能' });
+  await new Promise((r) => setImmediate(r));
+  const second = manager.createFromPhone({ chatId: 'oc_1', chatName: null, text: '顺手看看这张', media });
+  release();
+  await Promise.all([first, second]);
+
+  const texts = spawned[0].submitted.map((s) => s.text);
+  assert.ok(texts.some((t) => t.includes('顺手看看这张')), `补投正文丢了：${JSON.stringify(texts)}`);
+  assert.ok(log.warns.some(([m]) => /附件下载失败/.test(m)));
+});

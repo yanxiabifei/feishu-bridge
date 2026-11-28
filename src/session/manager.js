@@ -878,7 +878,12 @@ function createManager({
       return text ? `${text}\n\n[附件] ${abs}` : `[附件] ${abs}`;
     } catch (err) {
       log.warn('附件下载失败', { chatId, message: String((err && err.message) || err) });
-      await api.sendText(chatId, '附件下载失败了，把内容直接打出来吧。');
+      try {
+        await api.sendText(chatId, '附件下载失败了，把内容直接打出来吧。');
+      } catch (notifyErr) {
+        // 提示发不出去，最多是用户不知道图没落地；这里再抛就会把正文补投一起掀翻
+        log.warn('附件失败提示没发出去', { chatId, message: String((notifyErr && notifyErr.message) || notifyErr) });
+      }
       return text;
     }
   }
