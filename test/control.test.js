@@ -176,6 +176,14 @@ test('直接改名：成功与失败都回话', async () => {
   assert.strictEqual(bad.calls.at(-1)[2], '别名「卡牌」不存在。');
 });
 
+test('改名写盘抛错（磁盘满、文件被占用）也回话：异常不外泄，别让消息静默消失', async () => {
+  const boom = harness({ rename: () => { throw new Error('EPERM: operation not permitted'); } });
+  await boom.control.onMessage({ chatId: 'oc_p2p', text: '改名 卡牌 卡牌2', senderOpenId: 'ou_me' });
+  assert.strictEqual(boom.calls.at(-1)[0], 'text');
+  assert.match(boom.calls.at(-1)[2], /改名失败/);
+  assert.match(boom.calls.at(-1)[2], /EPERM/);
+});
+
 test('点按钮改名：先问新名字，下一条文字当成新名字', async () => {
   const { control, calls, renames } = harness();
   await control.onCardAction({

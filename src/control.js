@@ -160,7 +160,16 @@ function createControl({ api, listSessions, closeSession, getProjects, renameAli
 
   async function doRename(chatId, from, to) {
     if (!to || /\s/.test(to)) { await send(chatId, '新别名不能为空、不能带空格。'); return; }
-    const r = renameAlias({ from, to });
+    let r;
+    try {
+      r = renameAlias({ from, to });
+    } catch (err) {
+      // 落盘抛错（磁盘满、文件被占用）不能让这条消息静默消失：用户以为改了，其实没改
+      const msg = String((err && err.message) || err);
+      log?.warn?.('control.alias_rename_failed', { from, to, message: msg });
+      await send(chatId, `改名失败：${msg}`);
+      return;
+    }
     if (!r || !r.ok) { await send(chatId, (r && r.message) || '改名失败。'); return; }
     log?.info?.('control.alias_renamed', { from, to });
     await send(chatId, `已把「${from}」改成「${to}」。以后在群里发「${to} 要做什么」就行。`);
