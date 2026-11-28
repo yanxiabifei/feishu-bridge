@@ -15,7 +15,13 @@ function loadProjects({ file, defaultCwd }) {
   if (raw && typeof raw === 'object') {
     for (const key of Object.keys(raw)) {
       const val = raw[key];
-      if (typeof val === 'string' && val.trim()) aliases[key] = val;
+      // 用 defineProperty：renameAlias 允许把别名改成 "__proto__"，
+      // 普通赋值会走原型 setter，读回来就丢
+      if (typeof val === 'string' && val.trim()) {
+        Object.defineProperty(aliases, key, {
+          value: val, enumerable: true, writable: true, configurable: true,
+        });
+      }
     }
   }
   const def = doc && typeof doc.default === 'string' && doc.default.trim()

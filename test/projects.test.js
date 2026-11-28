@@ -28,6 +28,16 @@ test('读取 aliases 与 default，过滤非字符串和空白值', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('别名是 __proto__ 时也能读出来（与 renameAlias 的写入口径一致）', () => {
+  const dir = tmpDir();
+  const file = path.join(dir, 'projects.json');
+  fs.writeFileSync(file, '{"aliases":{"__proto__":"D:/card"},"default":"D:/w"}');
+  const { aliases } = loadProjects({ file, defaultCwd: 'D:/w' });
+  const desc = Object.getOwnPropertyDescriptor(aliases, '__proto__');
+  assert.strictEqual(desc && desc.value, 'D:/card');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('JSON 损坏时不抛错，退回默认值', () => {
   const dir = tmpDir();
   const file = path.join(dir, 'projects.json');
