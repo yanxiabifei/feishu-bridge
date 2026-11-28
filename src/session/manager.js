@@ -576,8 +576,12 @@ function createManager({
       }
     }
 
-    store.remove(sessionId);
-    store.save();
+    // 收尾的网络调用期间用户可能刚好回复「重来」把会话复活了：
+    // 这时不能再删记录，否则 PTY 还活着、会话表里却没有它，成了永远收不掉的孤儿。
+    if (!sessions.has(sessionId)) {
+      store.remove(sessionId);
+      store.save();
+    }
   }
 
   // 崩溃 / 已停的会话原地重启。hook 文件、--settings、信任标记、--resume

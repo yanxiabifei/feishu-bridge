@@ -957,6 +957,31 @@ test('onCardAction：force-send 按钮等同「仍然发送」', async () => {
   assert.deepStrictEqual(spawned[0].submitted.at(-1), { text: '继续', origin: 'phone', force: true });
 });
 
+test('closeSession 收尾期间用户回复「重来」：不能把复活的新会话连同记录一起删掉', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { manager, store, spawned, rec } = await started({
+    apiOverrides: {
+      async sendText(chatId, text) {
+        if (String(text).includes('会话已结束')) await gate;
+      },
+    },
+  });
+
+  const closing = manager.closeSession(rec.id, { notify: true });
+  // closeSession 此刻卡在「会话已结束」的网络调用上
+  await new Promise((resolve) => setImmediate(resolve));
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '重来', senderOpenId: 'ou_me' });
+  assert.strictEqual(spawned.length, 2, '「重来」拉起了新 PTY');
+  release();
+  await closing;
+  await manager._drain();
+
+  assert.ok(store.get(rec.id), '复活后的会话记录不能被 closeSession 删掉');
+  assert.strictEqual(manager._sessions.size, 1, '新 PTY 必须还在会话表里，不能成了孤儿');
+  assert.strictEqual(spawned[1].killed, false, '新 PTY 不能被一起收掉');
+});
+
 test('closeSession：notify 时群发「会话已结束」，autoDisband 打开则解散群', async () => {
   const { manager, calls, rec } = await started({ configOverrides: { autoDisband: true } });
   await manager.closeSession(rec.id, { reason: 'window', notify: true });
