@@ -416,7 +416,7 @@ test('main：已有实例在跑就直接退出，不再装配', async () => {
   assert.strictEqual(h.calls.ipcOpts, null);
 });
 
-test('main：陈旧 ipc.json 探活失败后删掉并正常启动', async () => {
+test('main：陈旧 ipc.json 探活失败后正常启动，且不预删 ipc.json', async () => {
   const fsApi = fakeFs({ ipcExists: true, content: JSON.stringify({ port: 51000, pid: 999 }) });
   const h = makeDeps({
     fsApi,
@@ -426,6 +426,30 @@ test('main：陈旧 ipc.json 探活失败后删掉并正常启动', async () => 
   const r = await main({ deps: h.deps });
 
   assert.strictEqual(r.started, true);
-  assert.deepStrictEqual(fsApi.log.unlinked, ['C:/state/ipc.json']);
+  // 预删会误伤正在运行的实例，ipc.json 交给 startIpc 绑定成功后覆写
+  assert.deepStrictEqual(fsApi.log.unlinked, []);
   assert.ok(h.calls.ipcOpts);
+});
+
+test('main：同时启动撞上 EADDRINUSE 时复探活，已有实例就正常退出', async () => {
+  const fsApi = fakeFs({ ipcExists: true, content: JSON.stringify({ port: 51000, pid: 999 }) });
+  let probes = 0;
+  const h = makeDeps({
+    fsApi,
+    // 第一次探活（启动前）还是陈旧文件；第二次（bind 失败后）对方已经在应答
+    fetchImpl: async () => {
+      probes += 1;
+      if (probes === 1) throw new Error('ECONNREFUSED');
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+    ipcFactory: async () => {
+      const err = new Error('listen EADDRINUSE');
+      err.code = 'EADDRINUSE';
+      throw err;
+    },
+    attachSignals: false,
+  });
+  const r = await main({ deps: h.deps });
+
+  assert.deepStrictEqual(r, { started: false, pid: 999, port: 51000 });
 });

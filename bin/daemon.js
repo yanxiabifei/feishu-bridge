@@ -310,14 +310,24 @@ async function main({ deps = {} } = {}) {
     log.info('daemon.already_running', { pid: running.pid, port: running.port });
     return { started: false, pid: running.pid, port: running.port };
   }
+  // 不预删 ipc.json：startIpc 绑定成功后会自己覆写，绑定失败则保留原文件。
+  // 预删会让「输掉端口竞争的实例」把正在运行的实例的 ipc.json 删掉。
+  let daemon;
   try {
-    if (fsApi.existsSync(pathsApi.IPC)) fsApi.unlinkSync(pathsApi.IPC);
-  } catch {
-    // 陈旧 ipc.json 删不掉不阻断启动
+    daemon = await createDaemon({ deps: { ...deps, log } });
+    await daemon.start();
+  } catch (err) {
+    // 两个实例同时起来时，第二个会在 bind 时拿到 EADDRINUSE；
+    // 此时再探活一次，对方已经在跑就当「已有实例」收摊，而不是报错崩掉。
+    if (err && err.code === 'EADDRINUSE') {
+      const other = await probeRunning({ ipcFile: pathsApi.IPC, fsApi, fetchImpl });
+      if (other) {
+        log.info('daemon.already_running', { pid: other.pid, port: other.port });
+        return { started: false, pid: other.pid, port: other.port };
+      }
+    }
+    throw err;
   }
-
-  const daemon = await createDaemon({ deps: { ...deps, log } });
-  await daemon.start();
 
   if (deps.attachSignals !== false) {
     let stopping = false;

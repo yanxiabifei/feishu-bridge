@@ -508,3 +508,31 @@ test('handler 同步阻塞时响应仍先返回，且 handler 不在响应分发
   assert.strictEqual(startEv.synchronous, false, 'handler 必须在响应分发之后异步执行，不能同步调用');
   assert.ok(responseAt < endEv.t, '响应必须在 handler 结束前返回');
 });
+
+test('hook 请求体超过上限返回 413 且不触发回调', async (t) => {
+  const { ipc, calls } = await boot();
+  t.after(() => ipc.close());
+  const big = 'x'.repeat(300 * 1024);
+  const res = await fetch(`http://127.0.0.1:${ipc.port}/hook/stop?session=s1`, {
+    method: 'POST',
+    headers: { 'x-bridge-token': 'tok-1', 'content-type': 'application/json' },
+    body: big,
+  }).catch((err) => ({ status: 0, err }));
+  // 服务端在超限时直接断开，客户端可能收到 413，也可能拿到连接重置——都不能当作成功
+  assert.notStrictEqual(res.status, 200);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.strictEqual(calls.hook.length, 0);
+});
+
+test('同一端口重复启动时第二次 reject 而不是崩溃', async (t) => {
+  const { ipc } = await boot();
+  t.after(() => ipc.close());
+  const log2 = makeLog();
+  await assert.rejects(
+    startIpc({ port: ipc.port, token: 'tok-2', log: log2, handlers: {} }),
+    (err) => err && err.code === 'EADDRINUSE',
+  );
+  // 原实例不受影响
+  const res = await fetch(`http://127.0.0.1:${ipc.port}/health`);
+  assert.strictEqual(res.status, 200);
+});

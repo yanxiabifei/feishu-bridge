@@ -7,6 +7,11 @@ const { restrictAcl } = require('./secrets');
 // handler 名白名单：日志 event/字段只用固定值，绝不拼接动态内容。
 const HANDLER_NAMES = new Set(['onHookStop', 'onClientOpen', 'onClientMessage']);
 
+// hook 只上报一轮对话的文本，256KB 已经远超正常用量；不设上限就是内存放大器
+const MAX_HOOK_BODY = 256 * 1024;
+// 窗口断电/休眠后拿不到 FIN，只能靠 ping 把死连接筛出来
+const HEARTBEAT_MS = 30000;
+
 // 错误日志走结构化字段，交给 createLogger 的 redactor 脱敏；
 // 日志自身（appendFileSync）可能因磁盘/权限失败抛错，必须吞掉，不能拖垮 daemon。
 function reportHandlerError(log, name, err) {
@@ -84,8 +89,19 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
         return;
       }
       let body = '';
-      req.on('data', (c) => { body += c; });
+      let tooLarge = false;
+      req.on('data', (c) => {
+        if (tooLarge) return;
+        body += c;
+        if (body.length > MAX_HOOK_BODY) {
+          tooLarge = true;
+          body = '';
+          res.writeHead(413);
+          res.end();
+        }
+      });
       req.on('end', () => {
+        if (tooLarge) return;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{"ok":true}');
         let payload = {};
@@ -103,6 +119,8 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
   });
 
   const wss = new WebSocketServer({ server });
+  // wss 会把底层 server 的 'error' 再转发射一次；没有监听者就是 uncaughtException。
+  wss.on('error', (err) => warnIpcError(log, 'ipc.ws_error', err));
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.searchParams.get('token') !== token) {
@@ -110,6 +128,8 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
       return;
     }
     clients.add(ws);
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -123,8 +143,24 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
     }
   });
 
-  return new Promise((resolve) => {
+  // 端口被占用（两个实例同时启动）必须变成可捕获的 rejection：
+  // 没有 error 监听的 'error' 事件在 Node 里是 uncaughtException，直接崩进程。
+  return new Promise((resolve, reject) => {
+    const onListenError = (err) => reject(err);
+    server.once('error', onListenError);
     server.listen(port, '127.0.0.1', () => {
+      server.removeListener('error', onListenError);
+      server.on('error', (err) => warnIpcError(log, 'ipc.server_error', err));
+
+      const heartbeat = setInterval(() => {
+        for (const ws of clients) {
+          if (ws.isAlive === false) { ws.terminate(); continue; }
+          ws.isAlive = false;
+          try { ws.ping(); } catch { /* 已经断开 */ }
+        }
+      }, HEARTBEAT_MS);
+      if (heartbeat.unref) heartbeat.unref();
+
       const actualPort = server.address().port;
       if (ipcFile) {
         fs.mkdirSync(path.dirname(ipcFile), { recursive: true });
@@ -153,8 +189,11 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
         close() {
           if (closing) return closing;
           closing = new Promise((done) => {
+            clearInterval(heartbeat);
             for (const ws of clients) ws.terminate();
             wss.close();
+            // keep-alive 的连接会拖住 server.close 的回调，直接断掉
+            if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
             server.close(() => {
               try {
                 if (ipcFile && fs.existsSync(ipcFile)) fs.unlinkSync(ipcFile);
