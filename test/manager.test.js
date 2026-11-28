@@ -69,6 +69,7 @@ function setup({
         ps.started = true;
       },
       submitText(text, origin, opts) {
+        if (ps.throwOnSubmit && opts && opts.force) throw new Error('pty write failed');
         const item = { text, origin };
         if (opts && opts.force) item.force = true;
         ps.submitted.push(item);
@@ -429,6 +430,20 @@ test('onPhoneMessage：回「仍然发送」强行写入上一条', async () => 
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
   assert.deepStrictEqual(spawned[0].submitted, [{ text: '继续', origin: 'phone', force: true }]);
+});
+
+test('onPhoneMessage：「仍然发送」强写抛错 → 提示重发，不静默吞掉', async () => {
+  const { manager, spawned, calls } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  spawned[0].confirm = true;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+  spawned[0].throwOnSubmit = true;
+
+  // 强写不经过队列，pty.write 抛错没人兜底：必须回一条提示，不能只在日志里留一行
+  await assert.doesNotReject(() =>
+    manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' }));
+
+  assert.ok(calls.some((c) => c[0] === 'sendText' && /重新发一次/.test(c[2])));
 });
 
 test('onPhoneMessage：媒体先落盘，再把绝对路径发给会话', async () => {

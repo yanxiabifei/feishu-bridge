@@ -825,7 +825,15 @@ function createManager({
         await api.sendText(chatId, '那条消息已经过期了（会话重开过），把内容重新发一次吧。');
         return;
       }
-      const forced = ps.submitText(pending.text, 'phone', { force: true });
+      let forced;
+      try {
+        forced = ps.submitText(pending.text, 'phone', { force: true });
+      } catch (err) {
+        // 强写绕过队列，pty.write 抛错时没有 onError 兜底：不回一条消息用户以为发出去了
+        log.warn('强行发送失败', { chatId, message: errMessage(err) });
+        await api.sendText(chatId, '这条没写进去（会话那边报错了），把内容重新发一次吧。');
+        return;
+      }
       if (forced === 'closed') {
         await api.sendText(chatId, '会话刚刚断开了，回复「重来」重新开一轮。');
       }
