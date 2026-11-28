@@ -7,6 +7,7 @@ const path = require('node:path');
 const { readEndpoint, buildWsUrl } = require('../app/lib/endpoint');
 const { locateEndpointFile, listCandidates } = require('../app/lib/endpointFile');
 const { buildPicker } = require('../app/lib/pickerModel');
+const { closeChoices } = require('../app/lib/closePrompt');
 const { createSessionFeed } = require('../app/lib/sessionFeed');
 const { formatTitle, formatSyncLine, mmddhhmm } = require('../app/lib/format');
 
@@ -72,6 +73,18 @@ test('picker：会话记录里的 ISO 时间字符串也能正确排序', () => 
     ],
   });
   assert.deepStrictEqual(out.recent.map((r) => r.cwd), ['D:/new', 'D:/mid', 'D:/old']);
+});
+
+test('closePrompt：正忙时默认取消，空闲时默认结束；取消永远是 Esc', () => {
+  assert.deepStrictEqual(closeChoices('running').buttons.map((b) => b.id), ['cancel', 'detach', 'close']);
+  assert.strictEqual(closeChoices('starting').defaultId, 'cancel');
+  assert.strictEqual(closeChoices('running').cancelId, 'cancel');
+
+  const idle = closeChoices('idle');
+  assert.deepStrictEqual(idle.buttons.map((b) => b.id), ['close', 'detach', 'cancel']);
+  assert.strictEqual(idle.defaultId, 'close');
+  assert.strictEqual(idle.cancelId, 'cancel');
+  assert.strictEqual(idle.buttons.find((b) => b.id === 'close').label, '结束会话');
 });
 
 test('picker：可接回的会话只留未结束的，按最后活动倒序并带状态', () => {
