@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { readEndpoint, buildWsUrl } = require('../app/lib/endpoint');
+const { locateEndpointFile, listCandidates } = require('../app/lib/endpointFile');
 const { buildPicker } = require('../app/lib/pickerModel');
 const { createSessionFeed } = require('../app/lib/sessionFeed');
 const { formatTitle, formatSyncLine, mmddhhmm } = require('../app/lib/format');
@@ -112,6 +113,41 @@ test('sessionFeed：切换会话后不再挂着上一个会话的详情', () => 
   assert.strictEqual(feed.getState().selectedId, 's2');
   assert.strictEqual(feed.getState().selected.id, 's2');
   assert.strictEqual(feed.getState().selected.alias, '新');
+});
+
+test('endpointFile：优先环境变量，其次 cwd/state，再沿 exe 与 app 目录向上找', (t) => {
+  const root = tmpDir(t);
+  const cwd = path.join(root, 'work');
+  const bin = path.join(root, 'dist', 'app', 'resources', 'app');
+  fs.mkdirSync(path.join(root, 'state'), { recursive: true });
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  const stateFile = path.join(root, 'state', 'ipc.json');
+  fs.writeFileSync(stateFile, '{}');
+
+  const cands = listCandidates({ env: {}, cwd, execPath: path.join(root, 'dist', 'exe', 'a.exe'), appPath: bin });
+  assert.deepStrictEqual(cands.slice(0, 2), [
+    path.join(cwd, 'state', 'ipc.json'),
+    path.join(root, 'dist', 'exe', 'state', 'ipc.json'),
+  ]);
+  // cwd 下没有就往上找；app 目录向上 4 层正好是仓库根
+  assert.strictEqual(locateEndpointFile({ env: {}, cwd, execPath: path.join(root, 'dist', 'exe', 'a.exe'), appPath: bin, fsApi: fs }), stateFile);
+
+  const custom = path.join(root, 'custom.json');
+  fs.writeFileSync(custom, '{}');
+  assert.strictEqual(
+    locateEndpointFile({ env: { FEISHU_BRIDGE_IPC: custom }, cwd, execPath: bin, appPath: bin, fsApi: fs }),
+    custom,
+  );
+});
+
+test('endpointFile：都不存在时返回第一个候选，交给 readEndpoint 报「先运行 npm start」', (t) => {
+  const root = tmpDir(t);
+  const first = path.join(root, 'state', 'ipc.json');
+  assert.strictEqual(
+    locateEndpointFile({ env: {}, cwd: root, execPath: path.join(root, 'a.exe'), appPath: root, fsApi: fs }),
+    first,
+  );
 });
 
 test('format：窗口标题与底部状态栏', () => {
