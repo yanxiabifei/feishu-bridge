@@ -392,6 +392,18 @@ function createManager({
     return store.all().find((s) => s.claudeSessionId === claudeSessionId) || null;
   }
 
+  // 会话重启后，上一轮那张卡片已经没有人会来定稿了，就地补一刀。
+  async function closeOrphanCard(record, pending, text) {
+    if (!pending || !pending.cardId) return;
+    try {
+      await api.updateCardEntity(pending.cardId, cards.errorCard({ title: '进程异常退出', text }), pending.seq + 1);
+    } catch (err) {
+      log.warn('处理中卡片收尾失败', {
+        cardId: pending.cardId, chatId: record.chatId, message: errMessage(err),
+      });
+    }
+  }
+
   // 提前结束本轮（只回车、无输出、进程崩溃）时也要把「处理中」卡片就地定稿，
   // 不能留一张永远转圈的卡。不传 card 就用回复卡；崩溃这类场景传错误卡，标题才不会被标成 ✅。
   async function finalizePendingCard(record, text, card) {
@@ -757,6 +769,9 @@ function createManager({
     record.claudeSessionId = null;
     record.transcriptPath = null;
     record.status = 'starting';
+    // 上一轮那张「处理中」卡片新 PTY 不会替它收尾，先摘下来，拉起新进程后补一刀
+    const stale = record.pendingCard;
+    record.pendingCard = null;
     try {
       store.save();
     } catch (err) {
@@ -773,6 +788,7 @@ function createManager({
         log.warn('重建状态落盘失败', { sessionId: record.id, message: errMessage(e) });
       }
       log.error('重建会话失败', { sessionId: record.id, message: errMessage(err) });
+      await closeOrphanCard(record, stale, '会话进程中途退出，这一轮没有结果。');
       try {
         await api.sendText(record.chatId, `重建会话失败：${errMessage(err)}。回复「重来」再试。`);
       } catch (e) {
@@ -781,6 +797,7 @@ function createManager({
       return;
     }
     ipc?.broadcast({ type: 'session', session: record });
+    await closeOrphanCard(record, stale, '会话进程中途退出，这一轮没有结果。');
     try {
       await api.sendText(record.chatId, '上次的对话记录不在了，改用新会话重建。');
     } catch (err) {

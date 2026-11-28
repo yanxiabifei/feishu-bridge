@@ -1465,3 +1465,25 @@ test('PTY 崩溃：本轮「处理中」卡片就地定稿成错误卡，不留�
   assert.strictEqual(rec.pendingCard, null);
   assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, sentBefore, '不能另发一张错误卡');
 });
+
+test('--resume 失败降级重建：上一轮那张处理中卡片也要收尾，不能永远转圈', async () => {
+  const { manager, store, calls, spawned, rec } = await started();
+  rec.claudeSessionId = 'cs_1';
+  store.save();
+  manager._sessions.clear();
+  await manager.restoreAll();
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  spawned[1].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '继续干活' });
+  await manager._drain();
+  const pending = rec.pendingCard;
+  assert.ok(pending, '先有一张处理中卡片');
+
+  spawned[1].emit({ type: 'exit', code: 1 });
+  await manager._drain();
+
+  const upd = calls.filter((c) => c[0] === 'updateCardEntity' && c[1] === pending.cardId).at(-1);
+  assert.ok(upd, '处理中的卡必须被收尾');
+  assert.ok(JSON.stringify(upd).includes('这一轮没有结果'));
+  assert.strictEqual(rec.pendingCard, null);
+});
