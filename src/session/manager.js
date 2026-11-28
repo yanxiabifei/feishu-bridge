@@ -620,6 +620,18 @@ function createManager({
     ps.resize(c, r);
   }
 
+  // 镜像窗口 attach 时补当前画面；会话不活跃（重启后待恢复）就没有画面。
+  function replayFor(sessionId) {
+    const ps = sessions.get(sessionId);
+    if (!ps || typeof ps.replay !== 'function') return '';
+    try {
+      return ps.replay();
+    } catch (err) {
+      log.warn('读取屏幕快照失败', { sessionId, message: String((err && err.message) || err) });
+      return '';
+    }
+  }
+
   // 窗口连上来时的会话清单：以持久化记录为准，活会话叠加内存里的 pending/lastInput。
   function list() {
     return store.all().map((record) => {
@@ -787,6 +799,7 @@ function createManager({
     restoreAll,
     onPcKeys,
     onPcResize,
+    replayFor,
     list,
     shutdown,
     _drain: drainWork,

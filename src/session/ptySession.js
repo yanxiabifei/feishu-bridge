@@ -220,6 +220,10 @@ function createPtySession({
   return {
     session, start, submitText, onPcKeys, resize, releaseTurn, kill, pollReady,
     _pollReady: pollReady, _queue: queue,
+    // 镜像窗口 attach 时补画面：屏幕当前的 ANSI 快照
+    replay() {
+      return typeof screen.serialize === 'function' ? screen.serialize() : '';
+    },
     needsConfirm() { return status === 'idle' && !screen.inInputBox(); },
     snapshot() {
       return {

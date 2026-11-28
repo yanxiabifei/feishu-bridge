@@ -1037,6 +1037,16 @@ test('onPcResize：转发合法尺寸，忽略非法尺寸与未知会话', asyn
   assert.deepStrictEqual(spawned[0].resized, [[120, 40]]);
 });
 
+test('replayFor：返回活会话的屏幕快照，未知会话/不支持时为空串', async () => {
+  const { manager, spawned } = await started();
+  const id = spawned[0].session.id;
+  spawned[0].replay = () => '\x1b[32mhi\x1b[0m';
+  assert.strictEqual(manager.replayFor(id), '\x1b[32mhi\x1b[0m');
+  assert.strictEqual(manager.replayFor('nope'), '');
+  delete spawned[0].replay;
+  assert.strictEqual(manager.replayFor(id), '');
+});
+
 test('list：活会话叠加快照，退出后状态为 error', async () => {
   const { manager, spawned, rec } = await started();
   const live = manager.list().find((s) => s.id === rec.id);

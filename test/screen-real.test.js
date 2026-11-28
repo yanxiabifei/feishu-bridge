@@ -92,6 +92,28 @@ test('真实终端：状态页脚在输入框下方时仍判为输入框', async
   }
 });
 
+test('真实终端：serialize 还原视口内容与颜色，不带 scrollback', async () => {
+  const screen = realScreen({ cols: 40, rows: 6 });
+  try {
+    const lines = Array.from({ length: 30 }, (_, i) => `LINE${i}`);
+    await screen.write(lines.join('\r\n'));
+    await screen.write('\r\n\x1b[32mgreen\x1b[0m');
+    const ansi = screen.serialize();
+    assert.match(ansi, /green/);
+    assert.match(ansi, /\x1b\[[0-9;]*32/);
+    assert.ok(!ansi.includes('LINE0'), '默认只还原视口，不重放 1000 行 scrollback');
+  } finally {
+    screen.dispose();
+  }
+});
+
+test('真实终端：dispose 后 serialize 返回空串', async () => {
+  const screen = realScreen();
+  await screen.write('x');
+  screen.dispose();
+  assert.strictEqual(screen.serialize(), '');
+});
+
 test('真实终端：正文中出现 ❯ 但未锚定行首时不判为输入框', async () => {
   const screen = realScreen();
   try {

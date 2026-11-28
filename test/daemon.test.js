@@ -318,6 +318,24 @@ test('IPC 客户端消息：list / ping / input / resize / create / close / 未�
   assert.ok(sent.some((o) => o.type === 'error' && o.message.includes('bogus')));
 });
 
+test('IPC attach：先回会话记录，再回屏幕快照（镜像窗口靠它补历史画面）', async () => {
+  const h = makeDeps();
+  await createDaemon({ deps: h.deps });
+  const ws = { fake: true };
+  const session = { id: 's1', alias: '卡牌', status: 'idle' };
+  h.manager.list = () => [session];
+  h.manager.replayFor = (id) => (id === 's1' ? '\x1b[32mhi\x1b[0m' : '');
+
+  h.ipc.handlers.onClientMessage({ type: 'attach', sessionId: 's1' }, ws);
+  assert.deepStrictEqual(h.calls.sent.map((s) => s.obj), [
+    { type: 'session', session },
+    { type: 'replay', sessionId: 's1', data: '\x1b[32mhi\x1b[0m' },
+  ]);
+
+  h.ipc.handlers.onClientMessage({ type: 'attach', sessionId: 'nope' }, ws);
+  assert.deepStrictEqual(h.calls.sent.at(-1).obj, { type: 'error', message: '会话不存在' });
+});
+
 test('start / stop：先恢复会话再连飞书；退出时先断连再收尾', async () => {
   const { deps, calls } = makeDeps();
   const daemon = await createDaemon({ deps });

@@ -1,4 +1,5 @@
 const { Terminal } = require('@xterm/headless');
+const { SerializeAddon } = require('@xterm/addon-serialize');
 
 const BRACKET_OPEN = '\x1b[200~';
 const BRACKET_CLOSE = '\x1b[201~';
@@ -22,6 +23,13 @@ function createScreen({
 } = {}) {
   // allowProposedApi 必须为 true，否则访问 term.buffer 会直接抛错
   const term = terminalFactory({ cols, rows, scrollback, allowProposedApi: true });
+  // 镜像窗口连上来时要把当前画面补给它。直接重放原始字节流会撞上「连上后已经在收
+  // 实时 data」的时序，序列化视口不会重也不会漏。
+  let serializeAddon = null;
+  if (typeof term.loadAddon === 'function') {
+    serializeAddon = new SerializeAddon();
+    term.loadAddon(serializeAddon);
+  }
   let lastDataAt = 0;
   let pendingWrites = 0;
   let disposed = false;
@@ -113,6 +121,17 @@ function createScreen({
         else out.push(line.text);
       }
       return out.join('\n');
+    },
+
+    // 当前视口的 ANSI 序列化，供镜像窗口 attach 时还原画面。
+    // 默认不带 scrollback：窗口只需要「现在屏幕上是什么」，重放 1000 行既慢又没用。
+    serialize({ scrollback = 0 } = {}) {
+      if (disposed || !serializeAddon) return '';
+      try {
+        return serializeAddon.serialize({ scrollback });
+      } catch {
+        return '';
+      }
     },
 
     inputLine() {

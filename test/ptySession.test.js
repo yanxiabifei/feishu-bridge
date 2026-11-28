@@ -30,6 +30,7 @@ function harness(overrides = {}) {
     write(d) { lastScreen += d; order.push('screen'); },
     isReady: () => ready,
     snapshot: () => 'screen-tail',
+    serialize: () => 'screen-ansi',
     inputLine: () => overrides.inputLine || '输入中的话',
     inInputBox: () => inBox,
     bracketedPaste: (t) => `\x1b[200~${t}\x1b[201~`,
@@ -185,6 +186,22 @@ test('snapshot 只暴露可序列化字段', () => {
     Object.keys(snap).sort(),
     ['agent', 'alias', 'chatId', 'cwd', 'id', 'lastInput', 'pending', 'status'],
   );
+});
+
+test('replay 走屏幕序列化；屏幕不支持时返回空串', () => {
+  const h = harness();
+  assert.strictEqual(h.ps.replay(), 'screen-ansi');
+
+  const bare = createPtySession({
+    session: { id: 's2', agent: 'claude', cwd: 'D:/w', status: 'idle', inputSeq: 0, lastInput: null },
+    launch: () => ({ file: 'node', args: [], cwd: 'D:/w' }),
+    ptyFactory: () => ({ onData() {}, onExit() {}, write() {}, kill() {} }),
+    screenFactory: () => ({ write() {}, isReady: () => false, dispose() {} }),
+    queueFactory: createQueue,
+    log: { info() {}, warn() {}, error() {} },
+    onEvent() {},
+  });
+  assert.strictEqual(bare.replay(), '');
 });
 
 // ---- 必须补充的用例 ----

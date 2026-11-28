@@ -71,8 +71,14 @@ async function createDaemon({ deps = {} } = {}) {
     if (type === 'list') { ipc.send(ws, { type: 'sessions', list: manager.list() }); return; }
     if (type === 'attach') {
       const found = manager.list().find((s) => s.id === msg.sessionId);
-      if (found) ipc.send(ws, { type: 'session', session: found });
-      else ipc.send(ws, { type: 'error', message: '会话不存在' });
+      if (!found) {
+        ipc.send(ws, { type: 'error', message: '会话不存在' });
+        return;
+      }
+      // 先回记录、再回画面快照。客户端在收到 replay 之前收到的实时 data 一律丢弃，
+      // 之后到达的 data 在 replay 之后，顺序上不会重放。
+      ipc.send(ws, { type: 'session', session: found });
+      ipc.send(ws, { type: 'replay', sessionId: msg.sessionId, data: manager.replayFor(msg.sessionId) });
       return;
     }
     if (type === 'input') { manager.onPcKeys({ sessionId: msg.sessionId, data: msg.data }); return; }
