@@ -192,6 +192,12 @@ function createPtySession({
     if (disposed || status === 'closed' || !pty) return;
     pty.write(data);
     if (status === 'starting') return;
+    if (status === 'running') {
+      // 这一轮还没结束：此刻敲进去的是排给下一轮的，不能抢走 lastInput，
+      // 否则本轮结果卡片会被标成「你刚在电脑上问：…」。按键已在上面透传。
+      lastActivityAt = now();
+      return;
+    }
     if (data.includes('\r') || data.includes('\n')) {
       const seq = session.inputSeq + 1;
       session.inputSeq = seq;

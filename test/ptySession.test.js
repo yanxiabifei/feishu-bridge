@@ -168,6 +168,17 @@ test('电脑端敲回车时用屏幕输入行记录 lastInput(origin=pc)', () =>
   assert.strictEqual(h.events.filter((e) => e.type === 'pc-input').length, 1);
 });
 
+test('本轮还在跑时电脑端敲回车，不抢走正在跑这一轮的 lastInput', () => {
+  const h = harness({ inputLine: '电脑上打的' });
+  h.ps.start(); h.ps._pollReady();
+  h.ps.submitText('手机问的', 'phone');   // status 转 running，这一轮归手机
+  h.ps.onPcKeys('\r');                    // 跑着的时候在电脑上敲了回车
+  assert.strictEqual(h.written.at(-1), '\r', '按键仍要透传给 PTY');
+  assert.strictEqual(h.session.lastInput.text, '手机问的');
+  assert.strictEqual(h.events.filter((e) => e.type === 'pc-input').length, 0);
+  assert.strictEqual(h.ps.status, 'running');
+});
+
 test('kill 清空积压并派发 exit 事件', () => {
   const h = harness();
   h.ps.start();
