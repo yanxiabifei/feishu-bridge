@@ -129,6 +129,9 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
     }
     clients.add(ws);
     ws.isAlive = true;
+    // 畸形帧（无效 UTF-8、超大帧）会让 ws 在连接对象上 emit('error')，
+    // 没有监听者时 EventEmitter 直接抛成 uncaughtException，整个 daemon 陪葬
+    ws.on('error', (err) => warnIpcError(log, 'ipc.ws_client_error', err));
     ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', (raw) => {
       let msg;

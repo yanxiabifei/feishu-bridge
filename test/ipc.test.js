@@ -259,6 +259,28 @@ test('onClientOpen 同步抛错只记 warn，不崩 daemon', async (t) => {
   assert.strictEqual(res.status, 200);
 });
 
+test('连接对象上的 error 事件有监听者，畸形帧不会把 daemon 带崩', async (t) => {
+  // 本地任何进程都能连上来；收到无效 UTF-8、超大帧时 ws 会在连接对象上 emit('error')，
+  // 没有监听者时 EventEmitter 同步抛错 → uncaughtException，所有会话一起挂
+  const lg = makeLog();
+  let serverWs = null;
+  const ipc = await startIpc({
+    port: 0,
+    token: 'tok-1',
+    log: lg,
+    handlers: { onClientOpen: (ws) => { serverWs = ws; } },
+  });
+  t.after(() => ipc.close());
+  const ws = new WebSocket(`ws://127.0.0.1:${ipc.port}/?token=tok-1`);
+  t.after(() => ws.terminate());
+  await new Promise((r) => ws.on('open', r));
+  await waitFor(() => serverWs !== null, '连接未到达服务端');
+
+  assert.doesNotThrow(() => serverWs.emit('error', new Error('invalid utf-8')));
+  const warn = lg.warns.find((w) => w.event === 'ipc.ws_client_error');
+  assert.ok(warn, '连接错误未记录 ipc.ws_client_error');
+});
+
 test('onHookStop 首次 rejection 后，第二次请求仍 200 且 handler 再次被调用', async (t) => {
   const lg = makeLog();
   let count = 0;
