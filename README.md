@@ -69,7 +69,8 @@
 
 ## 它长什么样
 
-<!-- 待补：一张手机端截图（群里 @机器人 → 回复卡片） -->
+<!-- 待补：手机端截图 —— 群里 @机器人 → 回复卡片、私聊「状态」「列表」。
+     拍摄与脱敏要求见 docs/screenshots-guide.md，拍好放 docs/images/ 后在这里引用。 -->
 
 ## 深入
 
@@ -85,6 +86,7 @@
 - 用不起来？先看 [`docs/faq.md`](docs/faq.md)；确实是 bug 就按模板开 issue。
 - 想改代码？读 [CONTRIBUTING.md](CONTRIBUTING.md)，本地 `npm test` 全绿再开 PR。一个 PR 做一件事。
 - 安全问题不要公开提，按 [SECURITY.md](SECURITY.md) 私密报告。
+- 有真机截图或录屏？按 [`docs/screenshots-guide.md`](docs/screenshots-guide.md) 拍 —— 比任何文案都直观。
 - 接下来可能做什么，写在 [ROADMAP.md](ROADMAP.md)。
 
 ## 许可
