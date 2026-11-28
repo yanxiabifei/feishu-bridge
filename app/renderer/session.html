@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>飞书桥</title>
+  <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="session.css">
+</head>
+<body>
+  <header class="top">
+    <span class="seal" aria-hidden="true">桥</span>
+    <p id="title" class="title">飞书桥</p>
+  </header>
+
+  <main id="screen" class="screen"></main>
+
+  <footer id="bottom" class="bottom">
+    <span id="dot" class="dot"></span>
+    <span id="sync" class="sync">连接中</span>
+    <span class="grow"></span>
+    <span id="dims" class="dims">—</span>
+  </footer>
+
+  <div id="overlay" class="overlay" hidden>
+    <div class="card" role="alertdialog" aria-labelledby="overlay-title">
+      <p id="overlay-title" class="card-title">会话已结束</p>
+      <p id="overlay-detail" class="card-detail"></p>
+      <button id="restart" class="btn" type="button" hidden>重来</button>
+    </div>
+  </div>
+
+  <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="session.js"></script>
+</body>
+</html>

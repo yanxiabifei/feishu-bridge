@@ -72,6 +72,7 @@ function sessionMeta(entry) {
     type: 'session-meta',
     title: formatTitle(session),
     syncLine: formatSyncLine({ session, state: transportState() }),
+    transport: transportState(),
     status: session ? session.status : null,
   };
 }
@@ -421,12 +422,12 @@ ipcMain.on('bridge:close-session', (event) => {
 ipcMain.on('bridge:picker', (event, item) => {
   const entry = windows.get(event.sender.id);
   if (!entry || entry.kind !== 'picker' || !item || typeof item !== 'object') return;
-  if (item.kind === 'attach' && item.sessionId) {
+  if (item.action === 'attach' && item.sessionId) {
     openSessionWindow(String(item.sessionId));
     closePicker(entry);
     return;
   }
-  if (item.kind === 'create' && typeof item.cwd === 'string' && item.cwd) {
+  if (item.action === 'create' && typeof item.cwd === 'string' && item.cwd) {
     entry.awaiting = 'create';
     entry.error = null;
     creatingPicker = entry;

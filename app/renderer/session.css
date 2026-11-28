@@ -1,0 +1,183 @@
+:root {
+  --ink: #12110f;
+  --chrome: #171614;
+  --line: #2b2721;
+  --fg: #e8e2d6;
+  --muted: #8a8174;
+  --accent: #c8401f;
+  --ok: #7f9a63;
+  --warn: #c9a227;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--ink);
+  color: var(--fg);
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+.top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--chrome);
+}
+
+.seal {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  background: var(--accent);
+  color: #fbf8f1;
+  font-family: "SimSun", "Songti SC", serif;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 1px;
+}
+
+.title {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.screen {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 8px 2px;
+}
+
+.screen .xterm { height: 100%; }
+
+.bottom {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  background: var(--chrome);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sync {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.grow { flex: 1; }
+
+.dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.bottom[data-state="synced"] .dot { background: var(--ok); }
+.bottom[data-state="reconnecting"] .dot { background: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
+.bottom[data-state="closed"] .dot { background: var(--accent); }
+.bottom[data-state="closed"] .sync { color: var(--accent); }
+
+.dims {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  color: #5c554a;
+}
+
+@keyframes pulse {
+  50% { opacity: 0.25; }
+}
+
+/* ── 结束/中断遮罩 ────────────────────────────────── */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(18, 17, 15, 0.68);
+  backdrop-filter: blur(1.5px);
+  animation: fade 120ms ease-out;
+}
+
+.overlay[hidden] { display: none; }
+
+.card {
+  min-width: 280px;
+  max-width: 420px;
+  padding: 20px 22px 18px;
+  border: 1px solid #3a352c;
+  border-top: 3px solid var(--accent);
+  background: #1b1916;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  text-align: center;
+}
+
+.card-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  letter-spacing: 0.05em;
+}
+
+.card-detail {
+  margin: 0 0 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.btn {
+  padding: 6px 22px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: var(--accent);
+  color: #fbf8f1;
+  font: inherit;
+  font-size: 12.5px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.btn:hover { background: #b33515; }
+
+.btn:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn[hidden] { display: none; }
+
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

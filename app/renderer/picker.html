@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>飞书桥</title>
+  <link rel="stylesheet" href="picker.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="brand">
+      <span class="seal" aria-hidden="true">桥</span>
+      <div class="brand-text">
+        <p class="eyebrow">FEISHU BRIDGE</p>
+        <h1>打开一个会话</h1>
+      </div>
+    </div>
+    <div class="transport">
+      <span id="dot" class="dot"></span>
+      <span id="transport">连接中</span>
+      <button id="retry" class="retry" type="button" hidden>重试</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <main id="list" class="list" role="listbox" aria-label="会话列表"></main>
+
+  <footer class="foot">
+    <button id="choose" class="other-row" type="button">
+      <span class="plus" aria-hidden="true">＋</span>
+      <span class="other-label">其他目录…</span>
+      <span id="chosen" class="chosen"></span>
+    </button>
+    <div id="agents" class="agents" hidden>
+      <span class="agents-hint">用哪个开工</span>
+      <button class="agent" type="button" data-agent="claude">claude</button>
+      <button class="agent" type="button" data-agent="codex">codex</button>
+    </div>
+    <div class="keys">
+      <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+      <span><kbd>Enter</kbd> 打开</span>
+      <span><kbd>Esc</kbd> 关闭</span>
+    </div>
+  </footer>
+
+  <script src="picker.js"></script>
+</body>
+</html>
