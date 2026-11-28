@@ -1,14 +1,16 @@
 const fs = require('node:fs');
-const path = require('node:path');
 const http = require('node:http');
 const { WebSocketServer } = require('ws');
 const { restrictAcl } = require('./secrets');
+const { writeJsonAtomic } = require('./store');
 
 // handler 名白名单：日志 event/字段只用固定值，绝不拼接动态内容。
 const HANDLER_NAMES = new Set(['onHookStop', 'onClientOpen', 'onClientMessage']);
 
 // hook 只上报一轮对话的文本，256KB 已经远超正常用量；不设上限就是内存放大器
 const MAX_HOOK_BODY = 256 * 1024;
+// 窗口发给 daemon 的都是小段 JSON（按键、attach、resize），1MB 足够
+const MAX_WS_MESSAGE = 1024 * 1024;
 // 窗口断电/休眠后拿不到 FIN，只能靠 ping 把死连接筛出来
 const HEARTBEAT_MS = 30000;
 
@@ -74,7 +76,16 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
   const clients = new Set();
 
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://127.0.0.1');
+    let url;
+    try {
+      url = new URL(req.url, 'http://127.0.0.1');
+    } catch {
+      // 畸形请求目标（"//"、"//[" 之类）会让 new URL 抛错；
+      // 不接住就是 req 回调里冒出的 uncaughtException，整个 daemon 陪葬
+      res.writeHead(400);
+      res.end();
+      return;
+    }
 
     if (req.method === 'GET' && url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -83,19 +94,23 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
     }
 
     if (req.method === 'POST' && url.pathname === '/hook/stop') {
-      if (req.headers['x-bridge-token'] !== token) {
+      // token 没配置时必须拒绝：缺请求头时 undefined === undefined 会直接放行
+      if (typeof token !== 'string' || token === '' || req.headers['x-bridge-token'] !== token) {
         res.writeHead(401);
         res.end();
         return;
       }
-      let body = '';
+      // 按 Buffer 收齐再解码：按 chunk 转字符串会把跨分片的中文字符劈成乱码
+      const chunks = [];
+      let size = 0;
       let tooLarge = false;
       req.on('data', (c) => {
         if (tooLarge) return;
-        body += c;
-        if (body.length > MAX_HOOK_BODY) {
+        chunks.push(c);
+        size += c.length;
+        if (size > MAX_HOOK_BODY) {
           tooLarge = true;
-          body = '';
+          chunks.length = 0;
           res.writeHead(413);
           res.end();
         }
@@ -105,7 +120,7 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{"ok":true}');
         let payload = {};
-        try { payload = JSON.parse(body); } catch { /* 空 body 按空对象处理 */ }
+        try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* 空 body 按空对象处理 */ }
         const sessionId = url.searchParams.get('session') || '';
         if (handlers.onHookStop) {
           safeInvoke(log, 'onHookStop', () => handlers.onHookStop({ sessionId, payload }));
@@ -118,12 +133,18 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
     res.end();
   });
 
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({ server, maxPayload: MAX_WS_MESSAGE });
   // wss 会把底层 server 的 'error' 再转发射一次；没有监听者就是 uncaughtException。
   wss.on('error', (err) => warnIpcError(log, 'ipc.ws_error', err));
   wss.on('connection', (ws, req) => {
-    const url = new URL(req.url, 'http://127.0.0.1');
-    if (url.searchParams.get('token') !== token) {
+    let url;
+    try {
+      url = new URL(req.url, 'http://127.0.0.1');
+    } catch {
+      ws.close(4000, 'bad request');
+      return;
+    }
+    if (typeof token !== 'string' || token === '' || url.searchParams.get('token') !== token) {
       ws.close(4001, 'unauthorized');
       return;
     }
@@ -166,11 +187,11 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
 
       const actualPort = server.address().port;
       if (ipcFile) {
-        fs.mkdirSync(path.dirname(ipcFile), { recursive: true });
         try {
-          fs.writeFileSync(ipcFile, JSON.stringify({
+          // 原子写：hook 每次 Stop 都会读这个文件，普通写有短暂的半截窗口
+          writeJsonAtomic(ipcFile, {
             port: actualPort, token, pid: process.pid, startedAt: new Date().toISOString(),
-          }, null, 2));
+          });
           try {
             acl(ipcFile);
           } catch (err) {

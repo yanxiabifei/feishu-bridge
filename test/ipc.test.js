@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const net = require('node:net');
 const WebSocket = require('ws');
 const { startIpc } = require('../src/ipc');
 const { createLogger } = require('../src/log');
@@ -41,6 +42,18 @@ function hookPost(port, session = 's1') {
     method: 'POST',
     headers: { 'x-bridge-token': 'tok-1', 'content-type': 'application/json' },
     body: '{}',
+  });
+}
+
+// 裸 socket 收完整响应再结束：fetch 会偷偷把请求目标规整掉，测不到畸形请求
+function rawRequest(port, text) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(port, '127.0.0.1');
+    let data = '';
+    sock.on('data', (d) => { data += d; });
+    sock.on('end', () => resolve(data));
+    sock.on('error', reject);
+    sock.on('connect', () => sock.end(text));
   });
 }
 
@@ -544,6 +557,74 @@ test('hook 请求体超过上限返回 413 且不触发回调', async (t) => {
   assert.notStrictEqual(res.status, 200);
   await new Promise((r) => setTimeout(r, 100));
   assert.strictEqual(calls.hook.length, 0);
+});
+
+test('畸形请求目标回 400，守护进程照常服务', async (t) => {
+  const { ipc } = await boot();
+  t.after(() => ipc.close());
+  for (const target of ['//', '//[', 'http://[']) {
+    const resp = await rawRequest(
+      ipc.port,
+      `GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`,
+    );
+    assert.match(resp, /^HTTP\/1\.1 400/, `${target} 应回 400，实际收到：${resp.slice(0, 60)}`);
+  }
+  const res = await fetch(`http://127.0.0.1:${ipc.port}/health`);
+  assert.strictEqual(res.status, 200);
+});
+
+test('没配 token 时 hook 接口一律拒绝，不能因为双方都是 undefined 就放行', async (t) => {
+  const calls = [];
+  const ipc = await startIpc({ port: 0, log, handlers: { onHookStop: (x) => calls.push(x) } });
+  t.after(() => ipc.close());
+  const res = await fetch(`http://127.0.0.1:${ipc.port}/hook/stop`, { method: 'POST', body: '{}' });
+  assert.strictEqual(res.status, 401);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.strictEqual(calls.length, 0);
+});
+
+test('hook 请求体跨 TCP 分片时中文不会变成乱码', async (t) => {
+  const { ipc, calls } = await boot();
+  t.after(() => ipc.close());
+  const payload = Buffer.from(JSON.stringify({ last_assistant_message: '中文内容' }));
+  // 切在「中」的三个字节中间，模拟 TCP 恰好把一个字符劈成两段
+  const cut = payload.indexOf(Buffer.from('中文内容')) + 1;
+  const head = Buffer.from(
+    'POST /hook/stop?session=s1 HTTP/1.1\r\n'
+    + 'Host: 127.0.0.1\r\n'
+    + 'x-bridge-token: tok-1\r\n'
+    + 'content-type: application/json\r\n'
+    + `content-length: ${payload.length}\r\n`
+    + 'connection: close\r\n\r\n',
+  );
+  await new Promise((resolve, reject) => {
+    const sock = net.connect(ipc.port, '127.0.0.1', () => {
+      sock.write(Buffer.concat([head, payload.subarray(0, cut)]));
+      setTimeout(() => sock.end(payload.subarray(cut)), 30);
+    });
+    sock.on('error', reject);
+    // 不 resume 就是不读，响应到不了 EOF，close 永远不来
+    sock.resume();
+    sock.on('close', resolve);
+  });
+  await waitFor(() => calls.hook.length === 1, 'hook 未分发');
+  assert.strictEqual(calls.hook[0].payload.last_assistant_message, '中文内容');
+});
+
+test('WebSocket：超大帧被关闭，守护进程继续服务', async (t) => {
+  const { ipc } = await boot();
+  t.after(() => ipc.close());
+  const ws = new WebSocket(`ws://127.0.0.1:${ipc.port}/?token=tok-1`);
+  t.after(() => ws.terminate());
+  ws.on('error', () => {});
+  await new Promise((r) => ws.on('open', r));
+  const code = await new Promise((resolve) => {
+    ws.on('close', (c) => resolve(c));
+    ws.send('x'.repeat(2 * 1024 * 1024));
+  });
+  assert.strictEqual(code, 1009);
+  const res = await fetch(`http://127.0.0.1:${ipc.port}/health`);
+  assert.strictEqual(res.status, 200);
 });
 
 test('同一端口重复启动时第二次 reject 而不是崩溃', async (t) => {
