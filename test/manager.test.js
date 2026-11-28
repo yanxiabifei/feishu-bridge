@@ -749,6 +749,45 @@ test('Stop 先到：慢建卡不会发出过期卡', async () => {
   assert.strictEqual(rec.pendingCard, null);
 });
 
+test('Stop：卡片定稿更新失败会原地重试一次，不重复发卡', async () => {
+  let updateCalls = 0;
+  const { manager, calls, spawned, rec } = await started({
+    apiOverrides: {
+      updateCardEntity: async (cardId, card, seq) => {
+        updateCalls += 1;
+        calls.push(['updateCardEntity', cardId, seq, card]);
+        if (updateCalls === 1) throw new Error('飞书抖了一下');
+      },
+    },
+  });
+  spawned[0].emit({ type: 'turn-start', seq: 2, origin: 'phone', text: '一' });
+  await manager._drain();
+  spawned[0].emit({ type: 'input', input: { seq: 2, origin: 'phone', text: '一', at: 2 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '好了' } });
+
+  assert.strictEqual(updateCalls, 2);
+  assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, 1); // 只有「已开工」
+});
+
+test('Stop：原地重试仍失败才改发新卡', async () => {
+  let updateCalls = 0;
+  const { manager, calls, spawned, rec } = await started({
+    apiOverrides: {
+      updateCardEntity: async () => {
+        updateCalls += 1;
+        throw new Error('一直失败');
+      },
+    },
+  });
+  spawned[0].emit({ type: 'turn-start', seq: 2, origin: 'phone', text: '一' });
+  await manager._drain();
+  spawned[0].emit({ type: 'input', input: { seq: 2, origin: 'phone', text: '一', at: 2 } });
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '好了' } });
+
+  assert.strictEqual(updateCalls, 2);
+  assert.ok(calls.some((c) => c[0] === 'sendCard' && JSON.stringify(c[2]).includes('好了')));
+});
+
 test('enqueueWork：建卡失败后队列仍能继续处理下一次 turn-start', async () => {
   let createCalls = 0;
   const { manager, spawned, rec } = await started({

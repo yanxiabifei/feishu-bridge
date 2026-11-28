@@ -435,7 +435,19 @@ function createManager({
 
     if (pending && pending.cardId) {
       try {
-        await api.updateCardEntity(pending.cardId, card, pending.seq + 1);
+        // 更新请求带 uuid（cardId-sequence），同一 sequence 重复提交是幂等的。
+        // 网络抖一下（尤其现在有 15 秒超时）就改发新卡，群里会多出一张内容重复的卡，
+        // 所以先原地重试一次，仍失败再兜底新发。
+        try {
+          await api.updateCardEntity(pending.cardId, card, pending.seq + 1);
+        } catch (first) {
+          log.warn('卡片定稿失败，原地重试一次', {
+            cardId: pending.cardId,
+            chatId: record.chatId,
+            message: String((first && first.message) || first),
+          });
+          await api.updateCardEntity(pending.cardId, card, pending.seq + 1);
+        }
         store.save();
         return;
       } catch (err) {

@@ -290,3 +290,75 @@ test('默认超时是 15 秒，两个入口都带上 AbortSignal', async () => {
   assert.ok(calls.length >= 3);
   for (const c of calls) assert.ok(c.opts.signal instanceof AbortSignal, `缺 signal：${c.url}`);
 });
+
+const jsonRes = (obj) => ({
+  ok: true,
+  status: 200,
+  json: async () => obj,
+  text: async () => JSON.stringify(obj),
+  arrayBuffer: async () => Buffer.from(''),
+});
+
+function apiWithRoutes(route) {
+  return createApi({
+    appId: 'cli_x',
+    appSecret: 'sec',
+    now: () => 1_000_000,
+    fetchImpl: async (url) => route(String(url)),
+  });
+}
+
+test('网关返回 HTML 的 5xx 归为 FeishuError，而不是 JSON 解析错误', async () => {
+  const api = apiWithRoutes((url) => (
+    url.includes('tenant_access_token')
+      ? jsonRes({ code: 0, msg: 'ok', tenant_access_token: 't-1', expire: 7200 })
+      : { ok: false, status: 502, text: async () => '<html>Bad Gateway</html>' }
+  ));
+  await assert.rejects(
+    () => api.sendText('oc_1', '你好'),
+    (err) => err instanceof FeishuError
+      && err.code === 502
+      && /HTTP 502/.test(err.message)
+      && /Bad Gateway/.test(err.message),
+  );
+});
+
+test('token 被判无效（99991663）时清缓存重取一次，请求自动恢复', async () => {
+  let tokenCalls = 0;
+  let bizCalls = 0;
+  const api = apiWithRoutes((url) => {
+    if (url.includes('tenant_access_token')) {
+      tokenCalls += 1;
+      return jsonRes({ code: 0, msg: 'ok', tenant_access_token: `t-${tokenCalls}`, expire: 7200 });
+    }
+    bizCalls += 1;
+    return bizCalls === 1
+      ? jsonRes({ code: 99991663, msg: 'invalid access token' })
+      : jsonRes({ code: 0, msg: 'ok', data: { message_id: 'om_1' } });
+  });
+  assert.strictEqual(await api.sendText('oc_1', '你好'), 'om_1');
+  assert.strictEqual(tokenCalls, 2);
+  assert.strictEqual(bizCalls, 2);
+});
+
+test('token 类错误只重试一次，仍然失败就抛出', async () => {
+  const api = apiWithRoutes((url) => (
+    url.includes('tenant_access_token')
+      ? jsonRes({ code: 0, msg: 'ok', tenant_access_token: 't-1', expire: 7200 })
+      : jsonRes({ code: 99991664, msg: 'invalid tenant token' })
+  ));
+  await assert.rejects(() => api.sendText('oc_1', 'x'), (e) => e.code === 99991664);
+});
+
+test('非 token 类业务错误不重试', async () => {
+  let bizCalls = 0;
+  const api = apiWithRoutes((url) => {
+    if (url.includes('tenant_access_token')) {
+      return jsonRes({ code: 0, msg: 'ok', tenant_access_token: 't-1', expire: 7200 });
+    }
+    bizCalls += 1;
+    return jsonRes({ code: 99991671, msg: 'token format error' });
+  });
+  await assert.rejects(() => api.sendText('oc_1', 'x'), (e) => e.code === 99991671);
+  assert.strictEqual(bizCalls, 1);
+});

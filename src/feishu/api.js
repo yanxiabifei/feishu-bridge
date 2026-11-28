@@ -9,6 +9,10 @@ class FeishuError extends Error {
 
 const CHAT_NOT_FOUND = 230002;
 
+// 飞书认定 tenant_access_token 无效的两个码：清缓存重取一次即可恢复
+// （99991661 是请求头没带，99991671 是格式不对，重试没有意义）
+const TOKEN_INVALID = new Set([99991663, 99991664]);
+
 function createApi({
   appId,
   appSecret,
@@ -54,7 +58,7 @@ function createApi({
     return inflight;
   }
 
-  async function request(method, path, { query, body, raw = false } = {}) {
+  async function requestOnce(method, path, { query, body, raw = false } = {}) {
     const t = await getToken();
     const qs = query ? `?${new URLSearchParams(query).toString()}` : '';
     const res = await callFetch(`${baseUrl}${path}${qs}`, {
@@ -65,14 +69,33 @@ function createApi({
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (raw) {
-      if (!res.ok) throw new FeishuError(res.status, await res.text(), path);
-      return Buffer.from(await res.arrayBuffer());
+    // 网关 5xx 返回的是 HTML，直接 res.json() 会变成 "Unexpected token '<'"
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      throw new FeishuError(res.status, `HTTP ${res.status}${snippet ? ` ${snippet}` : ''}`, path);
     }
+    if (raw) return Buffer.from(await res.arrayBuffer());
     const json = await res.json();
     if (json.code !== 0) throw new FeishuError(json.code, json.msg, path);
     return json.data;
   }
+
+  // token 被服务端判无效（密钥轮换、提前吊销）时缓存还活着，所有请求会一直失败到过期。
+  // 清掉缓存、重取一次；业务请求本身在鉴权前就被拒了，重试不会重复执行。
+  async function withTokenRetry(fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!(err instanceof FeishuError) || !TOKEN_INVALID.has(err.code)) throw err;
+      token = null;
+      tokenExp = 0;
+      inflight = null;
+      return fn();
+    }
+  }
+
+  const request = (method, path, opts) => withTokenRetry(() => requestOnce(method, path, opts));
 
   const sendMessage = async (chatId, msgType, content) => {
     const data = await request('POST', '/open-apis/im/v1/messages', {
@@ -139,17 +162,18 @@ function createApi({
       { query: { type }, raw: true },
     ),
 
-    getBotInfo: async () => {
+    getBotInfo: () => withTokenRetry(async () => {
       // bot/v3/info 把结果放在顶层 bot 字段，没有 data 包装，不能复用 request
       const t = await getToken();
       const res = await callFetch(`${baseUrl}/open-apis/bot/v3/info`, {
         method: 'GET',
         headers: { authorization: `Bearer ${t}` },
       });
+      if (!res.ok) throw new FeishuError(res.status, `HTTP ${res.status}`, '/open-apis/bot/v3/info');
       const json = await res.json();
       if (json.code !== 0) throw new FeishuError(json.code, json.msg, '/open-apis/bot/v3/info');
       return json.bot;
-    },
+    }),
   };
 }
 
