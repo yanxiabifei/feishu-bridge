@@ -40,7 +40,8 @@ function createManager({
   const sessions = new Map();
   const booting = new Map();        // chatId -> 无头接待期间收到的后续消息，建好会话后补投
   let shuttingDown = false;
-  const forcePending = new Map();   // chatId -> { text }：被护栏拦下、等「仍然发送」的那句
+  const forcePending = new Map();   // chatId -> { text, sessionId }：被护栏拦下、等「仍然发送」的那句
+  const chatChains = new Map();     // chatId -> 该群上一条消息的处理链，同群消息严格串行
   const turnInputs = new Map();     // sessionId -> 本轮真正发起的那条输入（lastInput 可能被中途覆盖）
   const TOOL_SUMMARY_MAX_BYTES = 20 * 1024 * 1024;
   let pendingWork = Promise.resolve();
@@ -494,6 +495,7 @@ function createManager({
     const ps = sessions.get(sessionId);
     sessions.delete(sessionId);
     turnInputs.delete(sessionId);
+    forcePending.delete(record.chatId);   // 会话都没了，暂存的「仍然发送」不该留到下一轮
     record.status = 'closing';        // 先置 closing，kill 出来的 exit 事件不会被当成崩溃
     store.save();
     if (ps) {
@@ -785,7 +787,7 @@ function createManager({
     }
   }
 
-  async function onPhoneMessage({
+  async function handlePhoneMessage({
     chatId, text, media = null, senderOpenId = null,
   }) {
     // 缺 owner 或缺发送者时一律 fail-closed：宁可漏掉一条，也不能让陌生人指挥本机
@@ -795,6 +797,30 @@ function createManager({
     }
 
     const record = store.getByChat(chatId);
+    let payload = String(text == null ? '' : text).trim();
+
+    // 「仍然发送」是桥接命令，不是要发给 agent 的正文。没有匹配的暂存（被普通消息清掉、
+    // 会话重开过）时只提示，绝不能把它当正文发出去，更不能在没登记过的群里拿它建出新会话。
+    if (payload === '仍然发送') {
+      const pending = forcePending.get(chatId);
+      forcePending.delete(chatId);
+      if (!pending) {
+        await api.sendText(chatId, '没有等待确认的消息了。');
+        return;
+      }
+      const ps = record && pending.sessionId === record.id ? sessions.get(record.id) : null;
+      if (!ps) {
+        await api.sendText(chatId, '那条消息已经过期了（会话重开过），把内容重新发一次吧。');
+        return;
+      }
+      const forced = ps.submitText(pending.text, 'phone', { force: true });
+      if (forced === 'closed') {
+        await api.sendText(chatId, '会话刚刚断开了，回复「重来」重新开一轮。');
+      }
+      return;
+    }
+    forcePending.delete(chatId);
+
     if (!record) {
       // 没登记过的群：首句即建会话指令（ws 层只把 @机器人 的消息转发到这里）
       await createFromPhone({ chatId, chatName: null, text, agent: config.defaultAgent || 'claude' });
@@ -802,7 +828,6 @@ function createManager({
     }
 
     let ps = sessions.get(record.id);
-    let payload = String(text == null ? '' : text).trim();
 
     if (payload === '重来' && (!ps || ['error', 'closed', 'interrupted'].includes(record.status))) {
       await revive(record);
@@ -820,19 +845,11 @@ function createManager({
       return;
     }
 
-    const pending = forcePending.get(chatId);
-    if (pending && payload === '仍然发送') {
-      forcePending.delete(chatId);
-      ps.submitText(pending.text, 'phone', { force: true });
-      return;
-    }
-    forcePending.delete(chatId);
-
     if (media) payload = await attachMedia(chatId, payload, media);
     if (!payload) return;
 
     if (ps.needsConfirm()) {
-      forcePending.set(chatId, { text: payload });
+      forcePending.set(chatId, { text: payload, sessionId: record.id });
       await api.sendCard(chatId, cards.screenCard({
         text: ps.screen.snapshot({ lines: 40 }),
         reason: 'not-ready',
@@ -843,7 +860,26 @@ function createManager({
     const result = ps.submitText(payload, 'phone');
     if (result === 'full') {
       await api.sendText(chatId, `积压了 ${config.queueLimit} 条还没处理完，稍后再发。`);
+    } else if (result === 'closed') {
+      await api.sendText(chatId, '会话刚刚断开了，回复「重来」重新开一轮。');
     }
+  }
+
+  // 同一个群的消息严格串行：并发进来时，媒体下载慢的那条会让后面的消息插队，
+  // 「护栏提示 → 仍然发送」也可能被打乱。排队后处理顺序和发送顺序一致。
+  function serializeChat(chatId, fn) {
+    const prev = chatChains.get(chatId) || Promise.resolve();
+    const run = prev.then(fn);
+    const tail = run.catch(() => {});   // 链尾吃掉异常，一条消息失败不能卡死后面的
+    chatChains.set(chatId, tail);
+    tail.then(() => {
+      if (chatChains.get(chatId) === tail) chatChains.delete(chatId);
+    });
+    return run;
+  }
+
+  function onPhoneMessage(args) {
+    return serializeChat(args.chatId, () => handlePhoneMessage(args));
   }
 
   return {

@@ -465,7 +465,7 @@ test('onPhoneMessage：会话已停 → 提示「重来」，不写入', async (
 });
 
 test('onPhoneMessage：普通消息会清掉待确认的旧文本，「仍然发送」不会复活它', async () => {
-  const { manager, spawned } = setup();
+  const { manager, spawned, calls } = setup();
   await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
 
   // 先被护栏拦下，暂存「继续」
@@ -477,12 +477,69 @@ test('onPhoneMessage：普通消息会清掉待确认的旧文本，「仍然发
   spawned[0].confirm = false;
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '先做别的', senderOpenId: 'ou_me' });
 
-  // 再发「仍然发送」：此时没有待确认文本，不能被当成强写指令把「继续」塞进去
+  // 再发「仍然发送」：此时没有待确认文本，不能被当成强写指令把「继续」塞进去，
+  // 它本身是桥接命令，也不该当正文发给 agent
   await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
 
   const texts = spawned[0].submitted.map((s) => s.text);
-  assert.deepStrictEqual(texts, ['先做别的', '仍然发送']);
+  assert.deepStrictEqual(texts, ['先做别的']);
   assert.ok(!spawned[0].submitted.some((s) => s.force === true));
+  assert.ok(calls.some((c) => c[0] === 'sendText' && /没有等待确认/.test(c[2])));
+});
+
+test('onPhoneMessage：没登记过的群里发「仍然发送」不会建会话', async () => {
+  const { manager, spawned, store, calls } = setup();
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
+  assert.strictEqual(spawned.length, 0);
+  assert.strictEqual(store.all().length, 0);
+  assert.ok(calls.some((c) => c[0] === 'sendText' && /没有等待确认/.test(c[2])));
+});
+
+test('onPhoneMessage：会话重开过，旧的「仍然发送」暂存作废', async () => {
+  const { manager, spawned, calls } = setup();
+  const old = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  spawned[0].confirm = true;
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  await manager.closeSession(old.id, { reason: 'test' });
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '仍然发送', senderOpenId: 'ou_me' });
+  assert.ok(!spawned.some((ps) => ps.submitted.some((s) => s.force === true)));
+  assert.ok(calls.some((c) => c[0] === 'sendText' && /没有等待确认/.test(c[2])));
+});
+
+test('onPhoneMessage：submitText 发现会话刚断开 → 提示「重来」，不静默吞掉', async () => {
+  const { manager, spawned, calls } = setup();
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+  spawned[0].pushResult = 'closed';
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '还在吗', senderOpenId: 'ou_me' });
+  assert.ok(calls.some((c) => c[0] === 'sendText' && /重来/.test(c[2])));
+});
+
+test('onPhoneMessage：同群并发消息按到达顺序处理，媒体下载慢也不插队', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { manager, spawned } = setup({
+    apiOverrides: { downloadResource: async () => { await gate; return Buffer.from('img'); } },
+    fsApi: { existsSync: () => true, mkdirSync() {}, writeFileSync() {} },
+  });
+  await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
+
+  const first = manager.onPhoneMessage({
+    chatId: 'oc_1',
+    text: '看这张图',
+    senderOpenId: 'ou_me',
+    media: { messageId: 'om_1', fileKey: 'fk_1', fileName: '图.png', type: 'image' },
+  });
+  const second = manager.onPhoneMessage({ chatId: 'oc_1', text: '算了', senderOpenId: 'ou_me' });
+  release();
+  await Promise.all([first, second]);
+
+  const texts = spawned[0].submitted.map((s) => s.text);
+  assert.strictEqual(texts.length, 2);
+  assert.ok(texts[0].startsWith('看这张图'));
+  assert.strictEqual(texts[1], '算了');
 });
 
 async function started(props) {
