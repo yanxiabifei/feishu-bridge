@@ -356,6 +356,45 @@ test('IPC 客户端消息：list / ping / input / resize / create / close / 未�
   assert.ok(sent.some((o) => o.type === 'error' && o.message.includes('bogus')));
 });
 
+test('IPC restart / detach：错误转成 error，成功回 restarted / detached', async () => {
+  const h = makeDeps();
+  await createDaemon({ deps: h.deps });
+  h.manager.restartSession = async (id) => (
+    id === 'gone' ? { ok: false, error: '会话不存在' }
+      : id === 'bad' ? { ok: false }
+        : { ok: true });
+  h.manager.notifyDetached = async () => ({ ok: true });
+  const ws = { fake: true };
+
+  h.ipc.handlers.onClientMessage({ type: 'restart', sessionId: 's1' }, ws);
+  h.ipc.handlers.onClientMessage({ type: 'restart', sessionId: 'gone' }, ws);
+  h.ipc.handlers.onClientMessage({ type: 'restart', sessionId: 'bad' }, ws);
+  h.ipc.handlers.onClientMessage({ type: 'detach', sessionId: 's1' }, ws);
+  await new Promise((r) => setImmediate(r));
+
+  const sent = h.calls.sent.map((s) => s.obj);
+  assert.deepStrictEqual(sent[0], { type: 'restarted', sessionId: 's1', ok: true });
+  assert.deepStrictEqual(sent[1], { type: 'error', message: '会话不存在' });
+  assert.deepStrictEqual(sent[2], { type: 'restarted', sessionId: 'bad', ok: false });
+  assert.deepStrictEqual(sent[3], { type: 'detached', sessionId: 's1' });
+});
+
+test('IPC restart / detach：管理器抛异常也各回各的，不把连接打断', async () => {
+  const h = makeDeps();
+  await createDaemon({ deps: h.deps });
+  h.manager.restartSession = async () => { throw new Error('炸了'); };
+  h.manager.notifyDetached = async () => { throw new Error('也炸了'); };
+  const ws = { fake: true };
+
+  h.ipc.handlers.onClientMessage({ type: 'restart', sessionId: 's1' }, ws);
+  h.ipc.handlers.onClientMessage({ type: 'detach', sessionId: 's1' }, ws);
+  await new Promise((r) => setImmediate(r));
+
+  const sent = h.calls.sent.map((s) => s.obj);
+  assert.deepStrictEqual(sent[0], { type: 'error', message: '炸了' });
+  assert.deepStrictEqual(sent[1], { type: 'detached', sessionId: 's1' });
+});
+
 test('IPC projects：把别名表和默认目录给项目选择器', async () => {
   const { deps, calls, ipc } = makeDeps();
   await createDaemon({ deps });

@@ -110,6 +110,21 @@ async function createDaemon({ deps = {} } = {}) {
         .catch((err) => log.warn('关闭会话失败', { sessionId: msg.sessionId, message: errText(err) }));
       return;
     }
+    if (type === 'restart') {
+      manager.restartSession(msg.sessionId)
+        .then((res) => {
+          if (res && res.error) ipc.send(ws, { type: 'error', message: res.error });
+          else ipc.send(ws, { type: 'restarted', sessionId: msg.sessionId, ok: Boolean(res && res.ok) });
+        })
+        .catch((err) => ipc.send(ws, { type: 'error', message: errText(err) }));
+      return;
+    }
+    if (type === 'detach') {
+      manager.notifyDetached(msg.sessionId)
+        .catch((err) => log.warn('窗口关闭告知失败', { sessionId: msg.sessionId, message: errText(err) }))
+        .finally(() => ipc.send(ws, { type: 'detached', sessionId: msg.sessionId }));
+      return;
+    }
     ipc.send(ws, { type: 'error', message: `未知的消息类型：${type}` });
   }
 
