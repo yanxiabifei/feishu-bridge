@@ -178,13 +178,20 @@ async function createDaemon({ deps = {} } = {}) {
       onMessage: (evt) => {
         const m = parseMessage(evt);
         if (!m) return;                                        // 机器人自己发的，防回环
-        if (m.chatType !== 'p2p' && !m.mentioned) return;      // 群里没 @ 就当闲聊
+        // 群里没 @ 就当闲聊；但图片/文件本身带不了 @，只看 @ 会把群里发的截图全丢掉
+        if (m.chatType !== 'p2p' && !m.mentioned && !m.media) return;
         if (m.unsupported) {
           api.sendText(m.chatId, `暂不支持 ${m.unsupported} 类型的消息，发文字、图片或文件吧。`)
             .catch((err) => log.warn('类型提示发送失败', { chatId: m.chatId, message: errText(err) }));
           return;
         }
         if (m.chatType === 'p2p') {                            // 私聊 = 总控面板，绝不建会话
+          // 面板只认文字指令；附件悄悄丢掉会让人以为桥坏了
+          if (m.media) {
+            api.sendText(m.chatId, '私聊只用于总控面板。图片/文件发到对应的会话群，不用 @ 我。')
+              .catch((err) => log.warn('附件提示发送失败', { chatId: m.chatId, message: errText(err) }));
+            return;
+          }
           control.onMessage({ chatId: m.chatId, text: m.text, senderOpenId: m.openId })
             .catch((err) => log.warn('总控面板处理失败', { chatId: m.chatId, message: errText(err) }));
           return;

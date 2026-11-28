@@ -219,6 +219,38 @@ test('手机文本：私聊进总控面板，群聊必须 @，占位符被剥掉
   ]);
 });
 
+// 飞书的图片/文件消息带不了 @，用「没 @ 就当闲聊」的规则会把群里发的所有截图都丢掉。
+test('群里直接发图片/文件（带不了 @）也要进 manager', async () => {
+  const { deps, calls } = makeDeps();
+  await createDaemon({ deps });
+  calls.wsOpts.handlers.onMessage(evt({
+    chat_type: 'group',
+    message_type: 'image',
+    content: '{"image_key":"img_1"}',
+    mentions: [],
+  }));
+  assert.deepStrictEqual(calls.manager.at(-1), [
+    'onPhoneMessage',
+    {
+      chatId: 'oc_1',
+      text: '',
+      media: { messageId: 'om_1', fileKey: 'img_1', type: 'image', fileName: 'om_1.png' },
+      senderOpenId: 'ou_me',
+    },
+  ]);
+});
+
+test('私聊发图片：回一句「去会话群发」，不进总控面板', async () => {
+  const { deps, calls } = makeDeps();
+  await createDaemon({ deps });
+  calls.wsOpts.handlers.onMessage(evt({ message_type: 'image', content: '{"image_key":"img_1"}' }));
+
+  assert.strictEqual(calls.control.length, 0);
+  assert.strictEqual(calls.manager.length, 0);
+  assert.strictEqual(calls.text.length, 1);
+  assert.ok(calls.text[0][1].includes('会话群'));
+});
+
 test('不支持的消息类型：群里回一句提示，不进 manager', async () => {
   const { deps, calls } = makeDeps();
   await createDaemon({ deps });

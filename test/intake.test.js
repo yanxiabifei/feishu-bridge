@@ -113,6 +113,18 @@ test('路径不存在时不调用接待', async () => {
   assert.strictEqual(r.source, 'path-missing');
 });
 
+test('空文本（群里只发了一张图）不跑接待：没有要判断的内容，别白等一次模型', async () => {
+  let called = 0;
+  const r = await run({
+    text: '',
+    runIntake: async () => { called += 1; return { cwd: 'D:/card', groupName: 'x', prompt: 'x' }; },
+  });
+  assert.strictEqual(called, 0);
+  assert.strictEqual(r.cwd, 'D:/w');
+  assert.strictEqual(r.prompt, '');
+  assert.strictEqual(r.decidedBy, 'rule');
+});
+
 test('parseCliOutput：优先读 structured_output，其次读 result 里的 JSON', () => {
   assert.deepStrictEqual(
     parseCliOutput('警告行\n{"structured_output":{"cwd":"D:/x"}}'),

@@ -834,8 +834,14 @@ function createManager({
     forcePending.delete(chatId);
 
     if (!record) {
-      // 没登记过的群：首句即建会话指令（ws 层只把 @机器人 的消息转发到这里）
-      await createFromPhone({ chatId, chatName: null, text, agent: config.defaultAgent || 'claude' });
+      // 没登记过的群：首句即建会话指令（ws 层只把 @机器人 或带附件的消息转发到这里）
+      const created = await createFromPhone({ chatId, chatName: null, text, agent: config.defaultAgent || 'claude' });
+      // 首条就是附件时正文是空的，会话建好后必须把附件补投进去，否则这张图就丢了
+      if (created && media) {
+        const withMedia = await attachMedia(chatId, '', media);
+        const ps = sessions.get(created.id);
+        if (ps && withMedia) ps.submitText(withMedia, 'phone');
+      }
       return;
     }
 

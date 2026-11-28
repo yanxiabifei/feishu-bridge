@@ -162,7 +162,9 @@ async function decide({
     forcedCwd: parsed.source === 'alias' || parsed.source === 'path' ? parsed.cwd : null,
   };
 
-  if (parsed.source === 'path-missing' || !enabled || typeof runIntake !== 'function') return base;
+  // 空文本（群里只发了一张图）没有可判断的内容，跑接待只是白等一次模型调用
+  const blank = !String(text == null ? '' : text).trim();
+  if (blank || parsed.source === 'path-missing' || !enabled || typeof runIntake !== 'function') return base;
 
   let out = null;
   try {

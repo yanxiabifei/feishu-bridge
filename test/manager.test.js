@@ -455,6 +455,26 @@ test('onPhoneMessage：媒体先落盘，再把绝对路径发给会话', async 
   assert.ok(sent.includes('截图.png'));
 });
 
+test('onPhoneMessage：没登记过的群首条就是图片 → 建好会话后把附件补投进去', async () => {
+  const writes = [];
+  const { manager, spawned } = setup({
+    apiOverrides: { downloadResource: async () => Buffer.from('img') },
+    fsApi: { existsSync: () => true, mkdirSync() {}, writeFileSync: (p) => writes.push(p) },
+  });
+  await manager.onPhoneMessage({
+    chatId: 'oc_1',
+    text: '',
+    senderOpenId: 'ou_me',
+    media: { messageId: 'om_1', fileKey: 'fk_1', fileName: '截图.png', type: 'image' },
+  });
+
+  assert.strictEqual(spawned.length, 1, '首条是附件也要把会话建起来');
+  assert.strictEqual(writes.length, 1);
+  const texts = spawned[0].submitted.map((s) => s.text);
+  assert.strictEqual(texts.length, 1);
+  assert.ok(texts[0].includes('截图.png'));
+});
+
 test('onPhoneMessage：会话已停 → 提示「重来」，不写入', async () => {
   const { manager, spawned, calls } = setup();
   await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌' });
