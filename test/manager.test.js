@@ -1354,6 +1354,17 @@ test('list：活会话叠加快照，退出后状态为 error', async () => {
   assert.strictEqual(dead.status, 'error');
 });
 
+test('list：电脑端敲回车开工时状态跟着变运行中，回到输入框后变回空闲', async () => {
+  const { manager, spawned, rec } = await started();
+  spawned[0].emit({ type: 'pc-input', input: { seq: 2, origin: 'pc', text: '改下登录页', at: 2 } });
+  // 手机端「状态」「列表」读的是持久化记录的 status；电脑端亲自开工时它也得跟着走
+  assert.strictEqual(manager.list().find((s) => s.id === rec.id).status, 'running');
+
+  spawned[0].emit({ type: 'turn-end' });
+  await manager._drain();
+  assert.strictEqual(manager.list().find((s) => s.id === rec.id).status, 'idle');
+});
+
 test('shutdown：杀 PTY、标记 interrupted、不解散群也不推崩溃卡', async () => {
   const broadcasts = [];
   // 按广播时刻快照会话：record 是活对象，shutdown 随后会把 status 改成 interrupted，

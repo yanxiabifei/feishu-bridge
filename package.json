@@ -1,6 +1,6 @@
 {
   "name": "feishu-bridge",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "飞书双向 AI 终端桥：手机与本地 Claude Code / Codex 会话双向同步",
   "license": "MIT",
   "repository": {

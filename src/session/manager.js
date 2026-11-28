@@ -121,7 +121,7 @@ function createManager({
       record.status = 'idle';
       record.resuming = false;   // 起来了就说明 --resume 没失败，崩溃不再走降级重建
     }
-    else if (e.type === 'turn-start') record.status = 'running';
+    else if (e.type === 'turn-start' || e.type === 'pc-input') record.status = 'running';
     else if (e.type === 'turn-end' && record.status === 'running') record.status = 'idle';
     else if (e.type === 'exit' && record.status !== 'closing' && !shuttingDown) record.status = 'error';
     if (e.type === 'input' || e.type === 'pc-input') record.lastInput = e.input || null;
