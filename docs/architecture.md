@@ -13,7 +13,7 @@
 ```
 
 - 守护进程通过飞书 SDK 的长连接接收 `im.message.receive_v1`，出站走 Open API。
-- 所有 PTY 都由守护进程持有；本机其他前端（将来的 Electron 窗口）通过 `127.0.0.1:<ipcPort>` 上的 HTTP + WebSocket 接入，`ipcPort` 默认 `47831`。
+- 所有 PTY 都由守护进程持有；本机其他前端（Electron 桌面窗口，见 `app/`）通过 `127.0.0.1:<ipcPort>` 上的 HTTP + WebSocket 接入，`ipcPort` 默认 `47831`。
 - 单例：重复 `npm start` 会检测到已在运行的实例并退出。
 
 ## 数据流
@@ -34,6 +34,16 @@
 - 页脚/状态栏形状允许出现在提示符行下方——判断「输入框就绪」时要一并考虑。
 - 括号粘贴序列（`\x1b[200~` / `\x1b[201~`）用于整段写入。
 - 对应测试：`test/screen.test.js`、`test/screen-real.test.js`。
+
+## 桌面窗口（Electron）
+
+`npm run window` 起一个 Electron 进程，它和 Stop hook 一样只是 daemon 的普通客户端：
+
+- 整个进程只开一条 WebSocket（`app/lib/client.js`），按 `sessionId` 把 `data`/`replay` 分给对应窗口；每个窗口自带一份 `sessionFeed`（`app/lib/sessionFeed.js`）做归约，窗口之间互不打扰。
+- 选择器（`app/renderer/picker.html`）负责新建会话或接回正在跑的会话；会话窗口（`session.html`）用 xterm 渲染，`input`/`resize` 原样转给 daemon。
+- 错误回包本身不带窗口身份，主进程用 `app/lib/errorRoute.js` 按 `sessionId` + `replyTo` 认领到具体窗口，认不出才广播给所有窗口。
+- 渲染进程 `contextIsolation: true`、`sandbox: true`，只能通过 `app/preload.js` 的窄接口和主进程说话；页面 CSP 是 `default-src 'self'`。
+- 关窗口弹二选一：结束会话（发 `close`，解散群）或只关窗口（发 `detach`，群里告知「电脑窗口已关，手机照常可发」）。
 
 ## 会话
 
@@ -69,6 +79,7 @@
 
 ```
 bin/        daemon / setup / stop hook 三个入口
+app/        Electron 主进程、预加载与渲染页（选择器 / 会话窗口）
 src/
   agent/    launcher（信任目录、启动参数）、tools（工具调用摘要）
   feishu/   ws（长连接+去重）、events、cards、api
@@ -94,5 +105,4 @@ CI 在 `.github/workflows/test.yml`，`windows-latest` × Node 22/24。
 3. Codex 的回复是终端画面文本，格式不如 Claude 干净。
 4. 不能接管已在 Windows Terminal 里运行的 claude 会话。
 5. 群解散事件丢失时最坏约 30 秒才收尾（长连接断开时巡检自动提速到 5 秒）。
-6. 电脑端镜像窗口（Plan B）未实现。
-7. macOS / Linux 未验证：依赖 ConPTY、DPAPI、PowerShell。
+6. macOS / Linux 未验证：依赖 ConPTY、DPAPI、PowerShell。

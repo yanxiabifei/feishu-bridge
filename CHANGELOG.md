@@ -2,6 +2,13 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] - 2026-11-28
+
+### 文档
+
+- `docs/architecture.md` 补上「桌面窗口（Electron）」一节：进程模型里说明窗口是 daemon 的普通客户端、单条 WebSocket 按会话分给各窗口、`errorRoute` 的错误归属规则、渲染进程的隔离与窄接口、关窗口时「结束会话 / 只关窗口」二选一。
+- 删掉过期的「桌面镜像窗口（Plan B）未实现」限制，目录树补上 `app/`。
+
 ## [0.3.1] - 2026-11-28
 
 ### 修复
