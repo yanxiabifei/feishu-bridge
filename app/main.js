@@ -9,6 +9,7 @@ const { createDaemonClient } = require('./lib/client');
 const { createSessionFeed } = require('./lib/sessionFeed');
 const { buildPicker } = require('./lib/pickerModel');
 const { closeChoices } = require('./lib/closePrompt');
+const { pickErrorTarget } = require('./lib/errorRoute');
 const { formatTitle, formatSyncLine } = require('./lib/format');
 
 const ACTIVE = (status) => !['closed', 'closing'].includes(status);
@@ -292,17 +293,17 @@ function routeToSession(sessionId, msg) {
   if (msg.type === 'replay') pushSessionMeta(entry);
 }
 
-function routeError(message) {
-  const text = String(message || '未知错误');
-  const waiting = [...windows.values()].filter((e) => e.awaiting);
-  if (waiting.length) {
-    const entry = waiting[waiting.length - 1];
-    entry.awaiting = null;
-    if (entry.kind === 'picker') {
-      entry.error = text;
-      pushPicker(entry);
+function routeError(msg) {
+  const text = String((msg && msg.message) || '未知错误');
+  const target = pickErrorTarget([...windows.values()].filter((e) => e.awaiting), msg);
+  if (target) {
+    target.awaiting = null;
+    if (target.kind === 'picker') {
+      if (creatingPicker === target) creatingPicker = null;
+      target.error = text;
+      pushPicker(target);
     } else {
-      sendEffect(entry, { type: 'error', message: text });
+      sendEffect(target, { type: 'error', message: text });
     }
     return;
   }
@@ -352,7 +353,7 @@ function onDaemonMessage(msg) {
     if (entry) entry.destroying = true;
     return;
   }
-  if (type === 'error') { routeError(msg.message); return; }
+  if (type === 'error') { routeError(msg); return; }
 }
 
 function openPicker() {

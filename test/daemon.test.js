@@ -374,7 +374,7 @@ test('IPC restart / detach：错误转成 error，成功回 restarted / detached
 
   const sent = h.calls.sent.map((s) => s.obj);
   assert.deepStrictEqual(sent[0], { type: 'restarted', sessionId: 's1', ok: true });
-  assert.deepStrictEqual(sent[1], { type: 'error', message: '会话不存在' });
+  assert.deepStrictEqual(sent[1], { type: 'error', message: '会话不存在', sessionId: 'gone', replyTo: 'restart' });
   assert.deepStrictEqual(sent[2], { type: 'restarted', sessionId: 'bad', ok: false });
   assert.deepStrictEqual(sent[3], { type: 'detached', sessionId: 's1' });
 });
@@ -391,7 +391,7 @@ test('IPC restart / detach：管理器抛异常也各回各的，不把连接打
   await new Promise((r) => setImmediate(r));
 
   const sent = h.calls.sent.map((s) => s.obj);
-  assert.deepStrictEqual(sent[0], { type: 'error', message: '炸了' });
+  assert.deepStrictEqual(sent[0], { type: 'error', message: '炸了', sessionId: 's1', replyTo: 'restart' });
   assert.deepStrictEqual(sent[1], { type: 'detached', sessionId: 's1' });
 });
 
@@ -420,7 +420,20 @@ test('IPC attach：先回会话记录，再回屏幕快照（镜像窗口靠它�
   ]);
 
   h.ipc.handlers.onClientMessage({ type: 'attach', sessionId: 'nope' }, ws);
-  assert.deepStrictEqual(h.calls.sent.at(-1).obj, { type: 'error', message: '会话不存在' });
+  assert.deepStrictEqual(h.calls.sent.at(-1).obj, {
+    type: 'error', message: '会话不存在', sessionId: 'nope', replyTo: 'attach',
+  });
+});
+
+test('IPC create 失败：error 回包带 replyTo，选择器才认得出是自己的', async () => {
+  const h = makeDeps();
+  await createDaemon({ deps: h.deps });
+  h.manager.createFromPc = async () => { throw new Error('建不起来'); };
+  h.ipc.handlers.onClientMessage({ type: 'create', cwd: 'D:/x', agent: 'claude' }, { fake: true });
+  await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(h.calls.sent.at(-1).obj, {
+    type: 'error', message: '建不起来', replyTo: 'create',
+  });
 });
 
 test('start / stop：先恢复会话再连飞书；退出时先断连再收尾', async () => {

@@ -88,7 +88,7 @@ async function createDaemon({ deps = {} } = {}) {
     if (type === 'attach') {
       const found = manager.list().find((s) => s.id === msg.sessionId);
       if (!found) {
-        ipc.send(ws, { type: 'error', message: '会话不存在' });
+        ipc.send(ws, { type: 'error', message: '会话不存在', sessionId: msg.sessionId, replyTo: 'attach' });
         return;
       }
       // 先回记录、再回画面快照。客户端在收到 replay 之前收到的实时 data 一律丢弃，
@@ -102,7 +102,7 @@ async function createDaemon({ deps = {} } = {}) {
     if (type === 'create') {
       manager.createFromPc({ cwd: msg.cwd, agent: msg.agent })
         .then((record) => ipc.send(ws, { type: 'session', session: record }))
-        .catch((err) => ipc.send(ws, { type: 'error', message: errText(err) }));
+        .catch((err) => ipc.send(ws, { type: 'error', message: errText(err), replyTo: 'create' }));
       return;
     }
     if (type === 'close') {
@@ -113,10 +113,15 @@ async function createDaemon({ deps = {} } = {}) {
     if (type === 'restart') {
       manager.restartSession(msg.sessionId)
         .then((res) => {
-          if (res && res.error) ipc.send(ws, { type: 'error', message: res.error });
-          else ipc.send(ws, { type: 'restarted', sessionId: msg.sessionId, ok: Boolean(res && res.ok) });
+          if (res && res.error) {
+            ipc.send(ws, { type: 'error', message: res.error, sessionId: msg.sessionId, replyTo: 'restart' });
+          } else {
+            ipc.send(ws, { type: 'restarted', sessionId: msg.sessionId, ok: Boolean(res && res.ok) });
+          }
         })
-        .catch((err) => ipc.send(ws, { type: 'error', message: errText(err) }));
+        .catch((err) => ipc.send(ws, {
+          type: 'error', message: errText(err), sessionId: msg.sessionId, replyTo: 'restart',
+        }));
       return;
     }
     if (type === 'detach') {

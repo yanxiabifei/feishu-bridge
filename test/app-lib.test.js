@@ -10,6 +10,7 @@ const { buildPicker } = require('../app/lib/pickerModel');
 const { closeChoices } = require('../app/lib/closePrompt');
 const { createSessionFeed } = require('../app/lib/sessionFeed');
 const { formatTitle, formatSyncLine, mmddhhmm } = require('../app/lib/format');
+const { pickErrorTarget } = require('../app/lib/errorRoute');
 
 function tmpDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-app-'));
@@ -192,4 +193,31 @@ test('format：会话记录里的 ISO 时间字符串也能进标题与状态栏
   assert.strictEqual(formatSyncLine({ session: { alias: '卡牌' }, at: iso }), '已同步 · 卡牌 · 11-23 21:40');
   assert.strictEqual(mmddhhmm('不是时间'), '');
   assert.strictEqual(mmddhhmm(0), '');
+});
+
+test('errorRoute：按 sessionId 认领，多窗口之间不串错误', () => {
+  const a = { kind: 'session', sessionId: 's1', awaiting: 'attach' };
+  const b = { kind: 'session', sessionId: 's2', awaiting: 'restart' };
+  assert.strictEqual(pickErrorTarget([a, b], { sessionId: 's1', replyTo: 'attach' }), a);
+  assert.strictEqual(pickErrorTarget([a, b], { sessionId: 's2', replyTo: 'restart' }), b);
+});
+
+test('errorRoute：只带 sessionId 的回包也认同一个会话', () => {
+  const a = { kind: 'session', sessionId: 's1', awaiting: 'attach' };
+  const b = { kind: 'session', sessionId: 's2', awaiting: 'attach' };
+  assert.strictEqual(pickErrorTarget([a, b], { sessionId: 's2' }), b);
+});
+
+test('errorRoute：没有 sessionId 的老回包按请求类型认领，认不出交给调用方广播', () => {
+  const picker = { kind: 'picker', awaiting: 'create' };
+  const win = { kind: 'session', sessionId: 's1', awaiting: 'attach' };
+  assert.strictEqual(pickErrorTarget([picker, win], { replyTo: 'create' }), picker);
+  assert.strictEqual(pickErrorTarget([picker, win], {}), null);
+  assert.strictEqual(pickErrorTarget([], { sessionId: 's1' }), null);
+  assert.strictEqual(pickErrorTarget(undefined, { replyTo: 'attach' }), null);
+});
+
+test('errorRoute：sessionId 对不上但类型对得上，仍按类型认领', () => {
+  const win = { kind: 'session', sessionId: 's1', awaiting: 'restart' };
+  assert.strictEqual(pickErrorTarget([win], { sessionId: 'other', replyTo: 'restart' }), win);
 });
