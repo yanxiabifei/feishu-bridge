@@ -8,14 +8,23 @@ function parseContent(raw) {
   }
 }
 
+// 先标出要删的 @，只收拾它周围的空白。正文里的缩进、空行是用户手打的内容，不能整体压平
+const MENTION_MARK = '\uF000'; // 私用区字符，正文里不会出现
+
 function postToText(post) {
   const blocks = Array.isArray(post && post.content) ? post.content : [];
   const rawCode = [];
+  let hasAt = false;
   const lines = blocks.map((line) => (Array.isArray(line) ? line : []).map((el) => {
     if (!el) return '';
     if (el.tag === 'text') return String(el.text || '');
     if (el.tag === 'a') return String(el.text || '') || String(el.href || '');
-    if (el.tag === 'at') return el.user_name ? `@${el.user_name}` : '';
+    if (el.tag === 'at') {
+      // 富文本的 @ 是独立元素，正文里没有 @_user_N 可剥；用同一个哨兵，
+      // 否则「@桥」会被当成正文喂给会话，也会挡住别名打头
+      hasAt = true;
+      return MENTION_MARK;
+    }
     if (el.tag === 'code_block') {
       // 代码块保留原文：用占位符绕过 stripMentions 的 @ 剥离
       const parts = Array.isArray(el.text) ? el.text : [el.text];
@@ -35,11 +44,8 @@ function postToText(post) {
   const body = lines.filter((l) => l !== '').join('\n');
   const title = post && post.title ? String(post.title) : '';
   const text = title ? (body ? `${title}\n${body}` : title) : body;
-  return { text, rawCode };
+  return { text, rawCode, hasAt };
 }
-
-// 先标出要删的 @，只收拾它周围的空白。正文里的缩进、空行是用户手打的内容，不能整体压平
-const MENTION_MARK = '\uF000'; // 私用区字符，正文里不会出现
 
 function stripMentions(text, mentions) {
   let out = String(text || '');
@@ -49,6 +55,8 @@ function stripMentions(text, mentions) {
   out = out.replace(/@_user_\d+/g, MENTION_MARK);
   // 独占一行的 @（群里先 @机器人 再换行写正文很常见）整行删掉，不留空行
   out = out.replace(/^[ \t]*\uF000[ \t]*\r?\n/gm, '');
+  // 行尾的 @ 直接吃掉，别在「第一段」后面留个空格
+  out = out.replace(/[ \t]*\uF000[ \t]*(?=\r?\n|$)/g, '');
   // 行内的 @ 连同两侧空白收成一个空格
   out = out.replace(/[ \t]*\uF000[ \t]*/g, ' ');
   out = out.replace(/\uF000/g, '');
@@ -82,7 +90,8 @@ function parseMessage(evt) {
     return base;
   }
   if (type === 'post') {
-    const { text, rawCode } = postToText(content);
+    const { text, rawCode, hasAt } = postToText(content);
+    base.mentioned = base.mentioned || hasAt;
     base.text = stripMentions(text, mentions)
       .replace(/\uE000(\d+)\uE001/g, (token, i) => (rawCode[i] === undefined ? token : rawCode[i]));
     return base;

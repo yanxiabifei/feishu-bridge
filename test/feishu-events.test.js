@@ -46,7 +46,7 @@ test('富文本 post 拉平为带标题的文本', () => {
     ],
   });
   const m = parseMessage(evt({}, { message_type: 'post', content, mentions: [{ key: '@_user_1', name: '桥' }] }));
-  assert.strictEqual(m.text, '标题\n第一段@桥\n第二段');
+  assert.strictEqual(m.text, '标题\n第一段\n第二段');
   assert.strictEqual(m.mentioned, true);
 });
 
@@ -212,6 +212,48 @@ test('仅含图片的 post 仍得到 [图片]', () => {
   const m = parseMessage(evt({}, { message_type: 'post', content }));
   assert.strictEqual(m.text, '[图片]');
   assert.strictEqual(m.media, null);
+});
+
+test('富文本 post 的 @ 元素整行剥掉，别名还能正常打头', () => {
+  // 富文本里的 @ 是独立元素，正文没有 @_user_N 可剥；不处理就会留下「@桥」挡住别名
+  const content = JSON.stringify({
+    content: [
+      [{ tag: 'at', user_id: '@_user_1', user_name: '桥' }],
+      [{ tag: 'text', text: '卡牌 帮我改个地形' }],
+    ],
+  });
+  const m = parseMessage(evt({}, {
+    message_type: 'post',
+    chat_type: 'group',
+    content,
+    mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: '桥' }],
+  }));
+  assert.strictEqual(m.text, '卡牌 帮我改个地形');
+  assert.strictEqual(m.mentioned, true);
+});
+
+test('富文本 post 行尾的 @ 不留下多余空格', () => {
+  const content = JSON.stringify({
+    content: [[
+      { tag: 'text', text: '第一段' },
+      { tag: 'at', user_id: '@_user_1', user_name: '桥' },
+    ], [{ tag: 'text', text: '第二段' }]],
+  });
+  const m = parseMessage(evt({}, {
+    message_type: 'post',
+    content,
+    mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: '桥' }],
+  }));
+  assert.strictEqual(m.text, '第一段\n第二段');
+});
+
+test('富文本 post 有 @ 元素但没带 mentions 时也算提到了机器人', () => {
+  const content = JSON.stringify({
+    content: [[{ tag: 'at', user_id: '@_user_1', user_name: '桥' }], [{ tag: 'text', text: '看看这个' }]],
+  });
+  const m = parseMessage(evt({}, { message_type: 'post', chat_type: 'group', content }));
+  assert.strictEqual(m.text, '看看这个');
+  assert.strictEqual(m.mentioned, true);
 });
 
 test('卡片动作顶层 open_chat_id 优先于 context', () => {
