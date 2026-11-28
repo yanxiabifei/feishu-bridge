@@ -1581,6 +1581,24 @@ test('closeSession：本轮「处理中」卡片就地收尾成「会话已结�
   assert.ok(!JSON.stringify(upd[3]).includes('进程异常退出'), '主动关闭不能标成崩溃');
 });
 
+test('closeSession：会话表落盘失败也必须结束 PTY 并收尾卡片，不能卡在 closing', async () => {
+  const { manager, calls, spawned, rec, store } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个长的' });
+  await manager._drain();
+  const pending = rec.pendingCard;
+  assert.ok(pending, '先有一张处理中卡片');
+
+  // 磁盘满 / AV 占用 sessions.json：落盘抛错
+  store.save = () => { throw new Error('磁盘满了'); };
+  await manager.closeSession(rec.id, { notify: true });
+  await manager._drain();
+
+  assert.strictEqual(spawned[0].killed, true, '落盘失败不能拦住 kill，否则留下无法回收的孤儿进程');
+  assert.strictEqual(rec.status, 'closed');
+  const upd = calls.filter((c) => c[0] === 'updateCardEntity' && c[1] === pending.cardId).at(-1);
+  assert.ok(upd, '处理中的卡必须被就地收尾，不能永远转圈');
+});
+
 test('restoreAll：上次没跑完的「处理中」卡片就地收尾，不留转圈的', async () => {
   const { manager, calls, spawned, rec } = await started();
   spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个长的' });

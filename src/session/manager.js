@@ -573,7 +573,7 @@ function createManager({
     turnInputs.delete(sessionId);
     forcePending.delete(record.chatId);   // 会话都没了，暂存的「仍然发送」不该留到下一轮
     record.status = 'closing';        // 先置 closing，kill 出来的 exit 事件不会被当成崩溃
-    store.save();
+    saveSession(record);
     if (ps) {
       try {
         ps.kill();
@@ -585,7 +585,7 @@ function createManager({
     record.status = 'closed';
     record.closedReason = reason;
     record.closedAt = new Date(now()).toISOString();
-    store.save();
+    saveSession(record);
     // 本轮那张「处理中」卡已经没人会来定稿了：就地收尾，别让群里永远转圈。
     // 主动关闭 / 被解散不是崩溃，标题不能写成「进程异常退出」。
     await finalizePendingCard(record, '', cards.errorCard({
@@ -611,8 +611,13 @@ function createManager({
     // 收尾的网络调用期间用户可能刚好回复「重来」把会话复活了：
     // 这时不能再删记录，否则 PTY 还活着、会话表里却没有它，成了永远收不掉的孤儿。
     if (!sessions.has(sessionId)) {
-      store.remove(sessionId);
-      store.save();
+      try {
+        store.remove(sessionId);
+        store.save();
+      } catch (err) {
+        // 落盘失败最多让重启后多恢复一条已结束的记录，不能把会话已关闭这件事回滚成异常
+        log.warn('落盘失败', { sessionId, message: errMessage(err) });
+      }
     }
   }
 
