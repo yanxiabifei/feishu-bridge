@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { readEndpoint, buildWsUrl } = require('../app/lib/endpoint');
-const { locateEndpointFile, listCandidates } = require('../app/lib/endpointFile');
+const { locateEndpointFile, listCandidates, locateStateDir } = require('../app/lib/endpointFile');
 const { buildPicker } = require('../app/lib/pickerModel');
 const { closeChoices } = require('../app/lib/closePrompt');
 const { createSessionFeed } = require('../app/lib/sessionFeed');
@@ -176,6 +176,27 @@ test('endpointFile：都不存在时返回第一个候选，交给 readEndpoint 
   assert.strictEqual(
     locateEndpointFile({ env: {}, cwd: root, execPath: path.join(root, 'a.exe'), appPath: root, fsApi: fs }),
     first,
+  );
+});
+
+test('endpointFile：locateStateDir 取第一个存在的 state 目录，不看 ipc.json 在不在', (t) => {
+  const root = tmpDir(t);
+  const cwd = path.join(root, 'work');
+  // 开机自启时 ipc.json 可能还没写出来，但 state 目录已经建好了
+  fs.mkdirSync(path.join(root, 'state'), { recursive: true });
+  fs.mkdirSync(cwd, { recursive: true });
+
+  assert.strictEqual(
+    locateStateDir({ env: {}, cwd, execPath: path.join(root, 'dist', 'exe', 'a.exe'), appPath: root, fsApi: fs }),
+    path.join(root, 'state'),
+  );
+});
+
+test('endpointFile：locateStateDir 一个都没有时退回 cwd/state', (t) => {
+  const root = tmpDir(t);
+  assert.strictEqual(
+    locateStateDir({ env: {}, cwd: root, execPath: path.join(root, 'a.exe'), appPath: root, fsApi: fs }),
+    path.join(root, 'state'),
   );
 });
 

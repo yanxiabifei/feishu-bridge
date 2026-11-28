@@ -49,7 +49,7 @@ function fakeApi(overrides = {}) {
 
 function setup({
   apiOverrides, fsApi, getProjects, now, projects, spawnThrows = false, ipc: ipcArg = null, configOverrides, log: logArg = null,
-  runIntake = null, hooksDir = null,
+  runIntake = null, hooksDir = null, onSessionCreated = null,
 } = {}) {
   const store = fakeStore();
   const { api, calls } = fakeApi(apiOverrides);
@@ -116,6 +116,7 @@ function setup({
     ipc,
     hooksDir,
     runIntake,
+    onSessionCreated,
     mediaRoot: 'D:/media',
     now: now || (() => new Date(2026, 10, 23, 21, 40).getTime()),
     rand: () => 0,
@@ -1944,4 +1945,50 @@ test('启动恢复时，已结束的旧记录连同 hook 文件一起清掉', as
   await manager.restoreAll();
 
   assert.ok(removed.includes(path.join('D:/hooks', 'smx_closed.hook.json')), `没删：${JSON.stringify(removed)}`);
+});
+
+test('onSessionCreated：手机建群后回调一次，带会话记录', async () => {
+  const seen = [];
+  const { manager } = setup({ onSessionCreated: (rec) => { seen.push(rec); } });
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 加个技能' });
+
+  assert.strictEqual(seen.length, 1);
+  assert.strictEqual(seen[0].id, rec.id);
+  assert.strictEqual(seen[0].chatId, 'oc_1');
+});
+
+test('onSessionCreated：电脑新建会话也会回调', async () => {
+  const seen = [];
+  const { manager } = setup({ onSessionCreated: (rec) => { seen.push(rec.id); } });
+  const rec = await manager.createFromPc({ cwd: 'D:/card' });
+
+  assert.deepStrictEqual(seen, [rec.id]);
+});
+
+test('onSessionCreated：回调同步抛错只记 warn，会话照建', async () => {
+  const log = fakeLog();
+  const { manager, store } = setup({
+    log,
+    onSessionCreated: () => { throw new Error('boom'); },
+  });
+
+  const rec = await manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 加个技能' });
+
+  assert.ok(rec && rec.id);
+  assert.ok(store.get(rec.id), '会话记录没写进 store');
+  assert.ok(log.warns.some(([m]) => m === 'window.notify_failed'), JSON.stringify(log.warns));
+});
+
+test('onSessionCreated：回调异步 reject 也只记 warn，会话照建', async () => {
+  const log = fakeLog();
+  const { manager, store } = setup({
+    log,
+    onSessionCreated: async () => { throw new Error('async boom'); },
+  });
+
+  const rec = await manager.createFromPc({ cwd: 'D:/card' });
+  await new Promise((r) => setImmediate(r));
+
+  assert.ok(store.get(rec.id), '会话记录没写进 store');
+  assert.ok(log.warns.some(([m]) => m === 'window.notify_failed'), JSON.stringify(log.warns));
 });

@@ -1,10 +1,16 @@
 // Electron 主进程：窗口只是 daemon 的又一个客户端。
 // 这里唯一的长连接由主进程持有，按 sessionId 把消息分给对应窗口，窗口之间互不打扰。
+const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const {
+  app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage,
+} = require('electron');
 const WebSocket = require('ws');
 const { readEndpoint, buildWsUrl } = require('./lib/endpoint');
-const { locateEndpointFile } = require('./lib/endpointFile');
+const { locateEndpointFile, locateStateDir } = require('./lib/endpointFile');
+const { parseLaunchArgs } = require('./lib/launchArgs');
+const startup = require('./lib/startup');
+const { writeJsonAtomic } = require('../src/store');
 const { createDaemonClient } = require('./lib/client');
 const { createSessionFeed } = require('./lib/sessionFeed');
 const { buildPicker } = require('./lib/pickerModel');
@@ -14,6 +20,9 @@ const { formatTitle, formatSyncLine } = require('./lib/format');
 
 const ACTIVE = (status) => !['closed', 'closing'].includes(status);
 const CREATE_TIMEOUT_MS = 60000;
+
+// 启动参数：daemon 拉起窗口时带 --session，开机自启时带 --hidden（只进托盘）。
+const launch = parseLaunchArgs(process.argv);
 
 const windows = new Map();        // webContents.id → { win, kind, sessionId, feed, … }
 const sessionWindows = new Map(); // sessionId → BrowserWindow
@@ -25,6 +34,8 @@ let everOpen = false;
 let endpointError = null;
 let creatingPicker = null;        // 正在等 create 回包的选择器
 let createTimer = null;           // create 等太久就报错，别让选择器一直转圈
+let tray = null;                  // 关窗后程序还在：托盘是唯一的入口
+let quitting = false;             // 只有用户点「退出」才真的走
 
 function entryOf(win) {
   return win && !win.isDestroyed() ? windows.get(win.webContents.id) : null;
@@ -43,7 +54,8 @@ function send(msg) {
 }
 
 function transportState() {
-  if (endpointError) return 'closed';
+  // 端点文件还没写出来（开机自启比 daemon 早）不算「断开」：重连循环会一直重读，
+  // 界面显示「连接中」才符合事实，也不会让人以为要手动处理。
   if (!client) return 'connecting';
   if (client.state === 'open') return 'synced';
   if (client.state === 'closed') return 'closed';
@@ -85,15 +97,14 @@ function pushSessionMeta(entry) {
 }
 
 function createClient() {
-  let file;
+  const file = locateEndpointFile({ appPath: app.getAppPath() });
+  // 端点文件可能还不存在（开机自启时 daemon 还没起）。只把原因当提示记下来，
+  // 客户端照建：重连循环每次都会重读端点，daemon 一起来就自动接上。
   try {
-    file = locateEndpointFile({ appPath: app.getAppPath() });
-    readEndpoint({ file }); // 启动时先读一次：读不到就明确报错，别让界面一直转圈
+    readEndpoint({ file });
     endpointError = null;
   } catch (err) {
     endpointError = String((err && err.message) || err);
-    pushPickers();
-    return null;
   }
   client = createDaemonClient({
     WebSocketImpl: WebSocket,
@@ -137,6 +148,9 @@ function onTransportChange(state) {
   if (state === 'open') {
     everOpen = true;
     endpointError = null;
+    // 先拉一次全量会话：knownSessions 有了底，才不会把「已有会话的更新」
+    // 当成新会话又弹一个窗口。常驻（--hidden）模式下没有选择器替我们做这件事。
+    send({ type: 'list' });
     for (const entry of windows.values()) {
       if (entry.kind === 'picker') requestLists(entry);
     }
@@ -153,12 +167,21 @@ function onTransportChange(state) {
   }
 }
 
+// 把窗口真正拉到用户眼前：Windows 前台锁有时只让窗口在任务栏闪，
+// 临时置顶一下再取消是最省事、又不限制用户操作的写法。
+function raiseWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.setAlwaysOnTop(true);
+  win.show();
+  win.focus();
+  win.setAlwaysOnTop(false);
+}
+
 function openSessionWindow(sessionId) {
   const existing = sessionWindows.get(sessionId);
   if (existing && !existing.isDestroyed()) {
-    if (existing.isMinimized()) existing.restore();
-    existing.show();
-    existing.focus();
+    raiseWindow(existing);
     return existing;
   }
   const session = sessions.get(sessionId);
@@ -196,7 +219,7 @@ function openSessionWindow(sessionId) {
   sessionWindows.set(sessionId, win);
 
   win.loadFile(path.join(__dirname, 'renderer', 'session.html'));
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => raiseWindow(win));
   win.webContents.on('did-finish-load', () => {
     entry.loaded = true;
     pushSessionMeta(entry);
@@ -216,6 +239,11 @@ function openSessionWindow(sessionId) {
 
 async function onSessionClose(entry, event) {
   if (entry.destroying) return;
+  // 点「退出」时别一个个弹确认框：直接放行
+  if (quitting) {
+    entry.destroying = true;
+    return;
+  }
   const session = sessions.get(entry.sessionId);
   const status = session ? session.status : 'closed';
   if (!session || !ACTIVE(status)) {
@@ -526,33 +554,143 @@ ipcMain.on('bridge:reconnect', (event) => {
   }
 });
 
+// ---- 常驻与开机启动 ------------------------------------------------------
+// 窗口和 daemon 共用 state/config.json：这里只增改自己那几个键，别把 daemon 的配置覆盖掉。
+
+function stateConfigFile() {
+  return path.join(locateStateDir({ appPath: app.getAppPath() }), 'config.json');
+}
+
+function readStateConfig() {
+  const file = stateConfigFile();
+  if (!fs.existsSync(file)) return {};
+  let raw = fs.readFileSync(file, 'utf8');
+  if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+  const obj = JSON.parse(raw);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('config.json 不是 JSON 对象');
+  return obj;
+}
+
+function updateStateConfig(patch) {
+  try {
+    writeJsonAtomic(stateConfigFile(), { ...readStateConfig(), ...patch });
+  } catch (err) {
+    // 配置坏了/写不进去都不能挡住窗口启动：开机自启只是锦上添花
+    console.warn('app.config_write_failed', String((err && err.message) || err));
+  }
+}
+
+// 打包版每次启动都登记一遍（幂等）：装到别的目录、注册表被清理都能自愈。
+// 用户取消过（windowAutostart=false）就不再补登记，尊重选择。
+function initPrefs() {
+  if (!app.isPackaged) return;
+  let cfg;
+  try {
+    cfg = readStateConfig();
+  } catch (err) {
+    console.warn('app.config_read_failed', String((err && err.message) || err));
+    return;
+  }
+  updateStateConfig({ windowExe: process.execPath });
+  if (cfg.windowAutostart !== false && !startup.isEnabled()) {
+    startup.setEnabled({ exePath: process.execPath, enabled: true });
+  }
+}
+
+function onToggleAutostart(checked) {
+  const actual = startup.setEnabled({ exePath: process.execPath, enabled: checked });
+  // 记下用户的选择本身，而不只是注册表状态：否则下次启动又会「贴心地」补登记
+  updateStateConfig({ windowAutostart: actual });
+  refreshTrayMenu();
+  if (actual !== checked) {
+    dialog.showMessageBox({
+      type: 'warning',
+      message: checked ? '开机启动没能打开' : '开机启动没能关闭',
+      detail: '注册表写入被拒绝了，可能是权限或安全软件拦截。',
+    }).catch(() => {});
+  }
+}
+
+function refreshTrayMenu() {
+  if (!tray) return;
+  const supported = app.isPackaged; // 开发模式不碰注册表
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开选择器', click: () => showPicker() },
+    { type: 'separator' },
+    {
+      label: '开机启动',
+      type: 'checkbox',
+      checked: supported && startup.isEnabled(),
+      enabled: supported,
+      click: (item) => onToggleAutostart(Boolean(item.checked)),
+    },
+    { type: 'separator' },
+    { label: '退出', click: () => quitApp() },
+  ]));
+}
+
+function createTray() {
+  if (tray) return tray;
+  let icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
+  if (icon.isEmpty()) icon = nativeImage.createEmpty(); // 图标丢了也要能起来，菜单还在
+  tray = new Tray(icon);
+  tray.setToolTip('飞书桥');
+  tray.on('click', () => showPicker());
+  tray.on('double-click', () => showPicker());
+  refreshTrayMenu();
+  return tray;
+}
+
+function showPicker() {
+  const existing = [...windows.values()].find((e) => e.kind === 'picker' && !e.win.isDestroyed());
+  if (existing) {
+    raiseWindow(existing.win);
+    return existing.win;
+  }
+  return openPicker();
+}
+
+function quitApp() {
+  quitting = true;
+  app.quit();
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  // 第二次启动（开机自启时用户又点了图标、或 daemon 拉起窗口时已有实例）不再新开进程：
+  // 带着 --session 就把那个会话窗口拉起来，否则把选择器拉到前面。
+  app.on('second-instance', (event, argv) => {
     if (!app.isReady()) return;
-    // 再点一次图标不该开出第二个选择器，把已经开着的那个拉到前面即可
-    const picker = [...windows.values()].find((e) => e.kind === 'picker' && !e.win.isDestroyed());
-    if (picker) {
-      if (picker.win.isMinimized()) picker.win.restore();
-      picker.win.show();
-      picker.win.focus();
+    const args = parseLaunchArgs(Array.isArray(argv) ? argv : []);
+    if (args.sessionId) {
+      openSessionWindow(args.sessionId);
       return;
     }
-    openPicker();
+    showPicker();
   });
-  app.whenReady().then(() => openPicker());
-  // Windows 上关掉所有窗口就是退出；没有托盘常驻的语义
-  app.on('window-all-closed', () => app.quit());
+  app.whenReady().then(() => {
+    initPrefs();
+    createTray();
+    // 常驻进程先连上：daemon 靠连接数判断窗口在不在线，在线就不会重复拉起
+    ensureClient();
+    if (launch.sessionId) openSessionWindow(launch.sessionId);
+    else if (!launch.hidden) showPicker();
+  });
+  // 关窗 ≠ 退出：收进托盘常驻，手机建群还能弹窗。真正退出走托盘菜单。
+  app.on('window-all-closed', () => {});
   app.on('before-quit', () => {
+    quitting = true;
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
     if (client) {
       const c = client;
       client = null;
       try { c.close(); } catch { /* 已经断了 */ }
     }
   });
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) openPicker();
-  });
+  app.on('activate', () => showPicker());
 }

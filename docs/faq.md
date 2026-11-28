@@ -22,6 +22,10 @@ Node.js 版本太低。测试脚本依赖 `node --test` 的 glob 展开，需要
 
 ### 能不能开机自启
 
+分两部分，都是可选的：
+
+**守护进程**（真正干活的那个）：
+
 ```bash
 npm run autostart            # 等价于 node scripts/autostart.js install
 node scripts/autostart.js status
@@ -29,6 +33,8 @@ node scripts/autostart.js uninstall
 ```
 
 它注册一个名为 `FeishuBridge.Daemon` 的 Windows 计划任务，登录后延迟 15 秒启动，失败会隔 60 秒重试。
+
+**桌面窗口**：打包版的托盘菜单里有「开机启动」，勾上后写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `FeishuBridge.Window`（`"<exe>" --hidden`），登录后窗口静默常驻托盘，不弹界面。取消勾选就删掉这一项，你的选择会记在 `state/config.json` 的 `windowAutostart`，下次启动不会自己装回去。开发模式（`npm run window`）不碰注册表，这个勾选框是灰的。
 
 ## 飞书侧：配好了但没反应
 
@@ -70,15 +76,25 @@ App ID / Secret 不对，或者应用被停用。去开放平台后台重新复�
 
 ### `npm run window` 打开的选择器提示「先运行 npm start」
 
-窗口只是守护进程的客户端，会话和终端进程都归守护进程管。先把 `npm start` 跑起来，再点选择器上的「重试」。
+窗口只是守护进程的客户端，会话和终端进程都归守护进程管。先把 `npm start` 跑起来。如果守护进程刚起、`state/ipc.json` 还没写出来，界面会显示「连接中」，等几秒会自动接上，不用手动点。
 
 ### 选择器显示「连接断开」
 
 守护进程挂了或者重启过。重新 `npm start` 后点「重试」即可，不用关窗口。端口在 `state/config.json` 的 `ipcPort`（默认 47831），守护进程和窗口读的是同一份 `state/ipc.json`，不要手改。
 
+### 关掉窗口后程序还在跑？
+
+是的，这是有意的。关掉选择器或会话窗口只是收进托盘，窗口进程继续连着守护进程——这样手机建群时它才能立刻弹出来。真要退出，右键托盘图标选「退出」；任务管理器里也能结束它，没有防杀机制。托盘图标单击/双击都会重新打开选择器。
+
 ### 手机建了群，电脑没弹窗
 
-窗口得开着（选择器关掉不影响已开的会话窗口，但整个 `npm run window` 进程退出了就没人收消息了）。另外只对「新出现的」会话自动弹窗；之前关掉过的窗口不会自己再弹，要接回就在选择器里点「接回正在跑的会话」。
+按这个顺序查：
+
+1. **托盘里有没有图标**。没有就说明窗口进程没在跑，并且 daemon 也没能把它拉起来。看 `logs/` 里有没有 `window.launch_skipped`：`no_exe` 表示找不到窗口程序（打包版漏了 `windowExe`，开发模式是没装 `node_modules/electron`）；`disabled` 表示 `state/config.json` 里 `windowAutoLaunch` 被设成了 `false`。
+2. **只有「新出现的」会话会自动弹窗**。之前关掉过的窗口不会自己再弹，要接回就在选择器里点「接回正在跑的会话」。
+3. **只在自己发的第一条消息时建会话**，群里闲聊不建。确认消息里 @ 了机器人。
+
+窗口在线时是它收到通知自己弹到前台；不在线时 daemon 会直接拉起一个窗口并接进该会话，不必先点托盘。
 
 ## 使用中
 
@@ -92,13 +108,19 @@ App ID / Secret 不对，或者应用被停用。去开放平台后台重新复�
 
 ### 电脑睡眠/关机后会怎样
 
-手机唤不醒电脑。守护进程跟着系统睡眠一起停，醒来后飞书长连接会自动重连。
+手机唤不醒电脑。守护进程跟着系统睡眠一起停，醒来后飞书长连接会自动重连；窗口进程如果被杀掉，下一条手机建群消息会让 daemon 重新拉起它。
 
 ### 怎么彻底卸载
 
 ```bash
-node scripts/autostart.js uninstall   # 如果装过自启
+node scripts/autostart.js uninstall   # 如果装过守护进程自启
 # 然后在飞书开放平台停用/删除这个自建应用
+```
+
+窗口的开机自启如果是开着的，先在托盘菜单里取消勾选，或者直接删掉注册表值：
+
+```powershell
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v FeishuBridge.Window /f
 ```
 
 再删掉项目目录即可。`state/` 里有加密后的 App Secret，跟着目录一起删。

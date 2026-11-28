@@ -23,6 +23,10 @@ const DEFAULTS = {
   sweepIntervalMs: 30000,
   sweepDegradedIntervalMs: 5000,
   ipcPort: 47831,
+  // 桌面窗口：打包版首次运行时自己写进来（process.execPath），开发模式留空走 node_modules/electron
+  windowExe: '',
+  // 窗口离线时手机建群要不要自动拉起它；关掉就只剩 IPC 广播，不弹任何窗口
+  windowAutoLaunch: true,
 };
 
 function loadConfig(file) {

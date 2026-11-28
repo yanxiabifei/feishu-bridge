@@ -273,6 +273,52 @@ test('onClientOpen 同步抛错只记 warn，不崩 daemon', async (t) => {
   assert.strictEqual(res.status, 200);
 });
 
+test('clientCount 随窗口连接增减，断开后归零', async (t) => {
+  const ipc = await startIpc({ port: 0, token: 'tok-1', log, handlers: {} });
+  t.after(() => ipc.close());
+  assert.strictEqual(ipc.clientCount(), 0);
+
+  const ws = new WebSocket(`ws://127.0.0.1:${ipc.port}/?token=tok-1`);
+  t.after(() => ws.terminate());
+  await new Promise((r) => ws.on('open', r));
+  await waitFor(() => ipc.clientCount() === 1, '连接后 clientCount 未增加');
+
+  const other = new WebSocket(`ws://127.0.0.1:${ipc.port}/?token=tok-1`);
+  t.after(() => other.terminate());
+  await new Promise((r) => other.on('open', r));
+  await waitFor(() => ipc.clientCount() === 2, '第二个连接未计入');
+
+  ws.close();
+  await waitFor(() => ipc.clientCount() === 1, '断开后 clientCount 未减少');
+});
+
+test('onClientClose 在连接断开后被调用，抛错只记 warn 不崩 daemon', async (t) => {
+  const lg = makeLog();
+  let closed = 0;
+  const ipc = await startIpc({
+    port: 0,
+    token: 'tok-1',
+    log: lg,
+    handlers: {
+      onClientClose: () => {
+        closed += 1;
+        throw new Error('close-boom');
+      },
+    },
+  });
+  t.after(() => ipc.close());
+
+  const ws = new WebSocket(`ws://127.0.0.1:${ipc.port}/?token=tok-1`);
+  t.after(() => ws.terminate());
+  await new Promise((r) => ws.on('open', r));
+  ws.close();
+
+  await waitFor(() => closed === 1, '断开后 onClientClose 未调用');
+  await waitFor(() => warnOf(lg, 'onClientClose', 'close-boom'), 'warn 未记录抛错');
+  const res = await fetch(`http://127.0.0.1:${ipc.port}/health`);
+  assert.strictEqual(res.status, 200);
+});
+
 test('连接对象上的 error 事件有监听者，畸形帧不会把 daemon 带崩', async (t) => {
   // 本地任何进程都能连上来；收到无效 UTF-8、超大帧时 ws 会在连接对象上 emit('error')，
   // 没有监听者时 EventEmitter 同步抛错 → uncaughtException，所有会话一起挂

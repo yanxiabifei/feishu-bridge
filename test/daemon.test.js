@@ -577,3 +577,42 @@ test('main：同时启动撞上 EADDRINUSE 时复探活，已有实例就正常�
 
   assert.deepStrictEqual(r, { started: false, pid: 999, port: 51000 });
 });
+
+test('窗口兜底：launcher 拿到 config / 仓库根目录，新会话带当前在线窗口数', async () => {
+  const launcherOpts = [];
+  const launches = [];
+  const h = makeDeps({
+    windowLauncherFactory: (o) => {
+      launcherOpts.push(o);
+      return { launch: (id, n) => { launches.push([id, n]); return { launched: true }; } };
+    },
+  });
+  h.deps.pathsApi.ROOT = 'C:/app';
+  await createDaemon({ deps: h.deps });
+
+  assert.strictEqual(launcherOpts.length, 1);
+  assert.strictEqual(launcherOpts[0].root, 'C:/app');
+  assert.strictEqual(launcherOpts[0].config.appId, CONFIG.appId);
+  assert.ok(launcherOpts[0].log);
+
+  h.ipc.clientCount = () => 2;
+  h.calls.managerOpts.onSessionCreated({ id: 's_9' });
+  assert.deepStrictEqual(launches, [['s_9', 2]], '在线数必须透传给 launcher，否则在线时还会多开一个窗口');
+});
+
+test('窗口关闭：onClientClose 记一条带剩余在线数的日志', async () => {
+  const infos = [];
+  const h = makeDeps({
+    logger: () => ({
+      info: (m, f) => infos.push([m, f]),
+      warn() {}, error() {}, redactor: { add() {} },
+    }),
+    windowLauncherFactory: () => ({ launch: () => ({}) }),
+  });
+  await createDaemon({ deps: h.deps });
+
+  h.ipc.clientCount = () => 0;
+  h.calls.ipcOpts.handlers.onClientClose();
+
+  assert.deepStrictEqual(infos.find(([m]) => m === 'window.closed'), ['window.closed', { clients: 0 }]);
+});

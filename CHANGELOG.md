@@ -2,6 +2,27 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.4] - 2026-11-28
+
+### 新增
+
+- **桌面窗口常驻托盘。** 关掉选择器或会话窗口只是收进托盘，`window-all-closed` 不再退出进程，WebSocket 一直连着。托盘菜单有「打开选择器 / 开机启动 / 退出」，单击双击图标都能把选择器拉回来；真正的退出来自托盘「退出」。
+- **开机自启。** 打包版每次启动时幂等写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `FeishuBridge.Window`（`"<exe>" --hidden`），不需要管理员权限；托盘勾选框可随时取消，选择记在 `state/config.json` 的 `windowAutostart`，下次启动不会自己装回去。开发模式不碰注册表。
+- **手机建群时，窗口离线也会被拉起来。** daemon 建好会话后看 IPC 连接数：窗口在线就走原有广播（窗口自己 `show()/focus()`，最小化的会还原）；离线则由 `src/windowLaunch.js` 以 `--session <id>` 直接 spawn 窗口并接进该会话，30 秒冷却、`windowAutoLaunch: false` 可关。在线判据复用现有的 30 秒 ping/pong，不另设心跳。
+- 守护进程日志新增 `window.launched` / `window.launch_skipped`（含 `online`/`disabled`/`no_exe`/`cooldown` 原因）和 `window.closed`（附带剩余在线窗口数）。
+
+### 修复
+
+- **开机自启比 daemon 早时窗口永远连不上。** 旧 `createClient()` 在 `state/ipc.json` 还不存在时直接放弃，之后从不重试，界面永远停在「连接断开」。现在客户端照建，`url()` 每次重连都重读端点文件，daemon 起来后自动接上；界面在端点缺失时显示「连接中」。
+- **`--hidden` 启动会把已有会话全当成新会话弹窗。** 没有选择器就没人去要会话列表，`knownSessions` 是空的，任何会话事件都被判成「新出现」。现在连接建立后先发一次 `list` 把已知会话填上。
+- **点托盘「退出」时逐个弹「结束会话/只关窗口」确认框。** 退出路径直接放行，不再拦。
+
+### 变更
+
+- `state/config.json` 新增两个键：`windowExe`（打包版写入自己的 `process.execPath`，开发模式留空）和 `windowAutoLaunch`（默认 `true`）。
+- `docs/architecture.md` 补「常驻与拉起」一节；`docs/faq.md` 更新开机自启、桌面窗口、手机建群没弹窗、卸载；`docs/acceptance.md` 新增第 13 条。
+- 测试用例 580 个（较 0.3.3 新增 28 个），离线运行约 9 秒。
+
 ## [0.3.3] - 2026-11-28
 
 ### 修复

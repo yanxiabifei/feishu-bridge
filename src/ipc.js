@@ -5,7 +5,7 @@ const { restrictAcl } = require('./secrets');
 const { writeJsonAtomic } = require('./store');
 
 // handler 名白名单：日志 event/字段只用固定值，绝不拼接动态内容。
-const HANDLER_NAMES = new Set(['onHookStop', 'onClientOpen', 'onClientMessage']);
+const HANDLER_NAMES = new Set(['onHookStop', 'onClientOpen', 'onClientClose', 'onClientMessage']);
 
 // hook 只上报一轮对话的文本，256KB 已经远超正常用量；不设上限就是内存放大器
 const MAX_HOOK_BODY = 256 * 1024;
@@ -162,7 +162,12 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
         safeInvoke(log, 'onClientMessage', () => handlers.onClientMessage(msg, ws));
       }
     });
-    ws.on('close', () => clients.delete(ws));
+    ws.on('close', () => {
+      clients.delete(ws);
+      if (handlers.onClientClose) {
+        safeInvoke(log, 'onClientClose', () => handlers.onClientClose(ws));
+      }
+    });
     if (handlers.onClientOpen) {
       safeInvoke(log, 'onClientOpen', () => handlers.onClientOpen(ws));
     }
@@ -211,6 +216,8 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
         port: actualPort,
         broadcast(obj) { for (const ws of clients) send(ws, obj); },
         send(ws, obj) { send(ws, obj); },
+        // 窗口在线判据：心跳每 30 秒会 terminate 掉漏回 pong 的连接，留下来的都还活着
+        clientCount() { return clients.size; },
         close() {
           if (closing) return closing;
           closing = new Promise((done) => {

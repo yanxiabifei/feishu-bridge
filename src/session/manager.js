@@ -37,6 +37,7 @@ function createManager({
   mediaRoot = paths.MEDIA,
   runIntake = null,
   hooksDir = null,
+  onSessionCreated = null,
 }) {
   const sessions = new Map();
   const booting = new Map();        // chatId -> 无头接待期间收到的后续消息，建好会话后补投
@@ -71,6 +72,20 @@ function createManager({
       store.upsert(record);
     } catch (err) {
       log.warn('落盘失败', { sessionId: record && record.id, message: errMessage(err) });
+    }
+  }
+
+  // 新会话建好后通知外面（daemon 靠它决定要不要把窗口拉起来）。
+  // 这条链路是「锦上添花」，回调抛错或 reject 都只记日志：会话已经建好了，不能被它带崩。
+  function notifyCreated(record) {
+    if (!onSessionCreated) return;
+    try {
+      const ret = onSessionCreated(record);
+      if (ret && typeof ret.then === 'function') {
+        ret.then(null, (err) => log.warn('window.notify_failed', { sessionId: record.id, message: errMessage(err) }));
+      }
+    } catch (err) {
+      log.warn('window.notify_failed', { sessionId: record.id, message: errMessage(err) });
     }
   }
 
@@ -370,6 +385,7 @@ function createManager({
     }
 
     log.info('session.created', { sessionId: record.id, chatId, agent: record.agent, cwd: record.cwd });
+    notifyCreated(record);
 
     // 首条必须在任何 await 之前入队：否则连发两条时第二条会抢先拿到 seq，
     // 且卡片发送失败会让函数 reject、首条提示词永远写不进去。
@@ -411,6 +427,7 @@ function createManager({
       throw new Error(`会话启动失败：${message}`);
     }
     log.info('session.created', { sessionId: record.id, chatId, agent: record.agent, cwd: record.cwd });
+    notifyCreated(record);
     await api.sendText(chatId, '会话已创建，可以从手机说话了。');
     return record;
   }

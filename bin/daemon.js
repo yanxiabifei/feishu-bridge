@@ -19,6 +19,7 @@ const { createQueue } = require('../src/session/queue');
 const { createPtySession } = require('../src/session/ptySession');
 const { createManager } = require('../src/session/manager');
 const { startIpc } = require('../src/ipc');
+const { createWindowLauncher } = require('../src/windowLaunch');
 
 const DEFAULT_PORT = 47831;
 const DEFAULT_SWEEP_MS = 30000;
@@ -40,6 +41,7 @@ async function createDaemon({ deps = {} } = {}) {
   const ptySessionFactory = deps.ptySessionFactory || createPtySession;
   const screenFactory = deps.screenFactory || createScreen;
   const queueFactory = deps.queueFactory || createQueue;
+  const windowLauncherFactory = deps.windowLauncherFactory || createWindowLauncher;
   const launchFn = deps.launchFn || buildLaunch;
   const ptyModule = deps.ptyModule || pty;
   const randomToken = deps.randomToken || (() => crypto.randomBytes(16).toString('hex'));
@@ -66,6 +68,9 @@ async function createDaemon({ deps = {} } = {}) {
   const store = storeFactory({ file: pathsApi.SESSIONS, log });
   store.load();
   const api = apiFactory({ appId: config.appId, appSecret, fetchImpl: deps.fetchImpl });
+
+  // 窗口离线时的兜底：手机建群直接拉起窗口并接进该会话。在线时走 IPC 广播，这里不插手。
+  const windowLauncher = windowLauncherFactory({ config, root: pathsApi.ROOT, log });
 
   let manager = null;
 
@@ -145,6 +150,9 @@ async function createDaemon({ deps = {} } = {}) {
           .catch((err) => log.warn('Stop 处理失败', { sessionId, message: errText(err) }));
       },
       onClientMessage: (msg, ws) => handleClientMessage(msg, ws),
+      onClientClose: () => {
+        log.info('window.closed', { clients: ipc.clientCount() });
+      },
     },
   });
 
@@ -156,6 +164,8 @@ async function createDaemon({ deps = {} } = {}) {
     ipc,
     hooksDir: pathsApi.HOOKS,
     getProjects: getProjectsFn,
+    // 窗口在线时 Ipc 广播已经会让它自己弹出来；只有离线才需要 daemon 亲自拉起进程。
+    onSessionCreated: (record) => windowLauncher.launch(record.id, ipc.clientCount()),
     createPtySession: (opts) => ptySessionFactory({
       ...opts,
       launch: (session) => launchFn({

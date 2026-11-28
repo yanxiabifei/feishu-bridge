@@ -43,7 +43,17 @@
 - 选择器（`app/renderer/picker.html`）负责新建会话或接回正在跑的会话；会话窗口（`session.html`）用 xterm 渲染，`input`/`resize` 原样转给 daemon。
 - 错误回包本身不带窗口身份，主进程用 `app/lib/errorRoute.js` 按 `sessionId` + `replyTo` 认领到具体窗口；认不出时只报给选择器并记一条 `bridge.unrouted_error`，不往会话窗口里塞。
 - 渲染进程 `contextIsolation: true`、`sandbox: true`，只能通过 `app/preload.js` 的窄接口和主进程说话；页面 CSP 是 `default-src 'self'`。
-- 关窗口弹二选一：结束会话（发 `close`，解散群）或只关窗口（发 `detach`，群里告知「电脑窗口已关，手机照常可发」）。
+- 关会话窗口弹二选一：结束会话（发 `close`，解散群）或只关窗口（发 `detach`，群里告知「电脑窗口已关，手机照常可发」）。
+
+### 常驻与拉起
+
+这个进程是**常驻**的，不是用完就走：关掉所有窗口只是收进托盘（`window-all-closed` 空实现），WebSocket 一直连着，真正的退出来自托盘菜单的「退出」（`app/main.js` 的 `quitApp()` 置 `quitting` 再 `app.quit()`）。这样 daemon 眼里窗口始终「在线」，手机建群不用等冷启动。
+
+- **在线判据 = WebSocket 连接数**（`ipc.clientCount()`）。`src/ipc.js` 已有的 30 秒 ping/pong 就是心跳：窗口进程被杀、崩溃、连接断了，连接数会掉到 0，不需要另一套存活检测。
+- **在线时**：daemon 建好会话后照常广播，窗口收到 `session` 事件自己 `show()/focus()`（`raiseWindow()` 顺带 `restore()` 最小化窗口并短暂置顶），不看当前焦点在哪。
+- **离线时**：`src/windowLaunch.js` 以 `--session <id>` 直接 `spawn` 窗口进程（`detached`，30 秒冷却，`config.windowAutoLaunch === false` 时不动），窗口起来后自动接进该会话。这里刻意不弹 Windows 系统 toast：省掉 AUMID + 自定义协议的注册，也少一个「点了没反应」的失败环节；daemon 在日志里留 `window.launched` / `window.launch_skipped` 便于排查。
+- **开机自启**：HKCU `Software\Microsoft\Windows\CurrentVersion\Run` 下的 `FeishuBridge.Window`，值为 `"<exe>" --hidden`，不需要管理员权限。打包版每次启动时幂等补写一次（免安装文件夹没有安装器可挂），托盘菜单的「开机启动」勾选项直接读写这个值；用户的取消记在 `state/config.json` 的 `windowAutostart`，下次启动不会"好心"再装回去。开发模式不碰注册表（勾选框置灰）。
+- **端点晚到不算故障**：开机自启比 daemon 早时 `state/ipc.json` 还不存在。`createClient()` 照建客户端，`url()` 每次重连都重读端点文件，界面显示「连接中」；daemon 起来后自动接上，不需要人工点「重试」。
 
 ## 会话
 
@@ -58,15 +68,18 @@
 
 | 文件 | 内容 |
 |---|---|
-| `state/config.json` | `claudeExe` / `codexEntry` / `defaultCwd` / `ipcPort` 等 |
+| `state/config.json` | `claudeExe` / `codexEntry` / `defaultCwd` / `ipcPort` / `windowExe` / `windowAutostart` 等 |
 | `state/projects.json` | 项目别名 → 目录 |
 | `state/secret.bin` | App Secret，DPAPI 加密，只有当前 Windows 用户能解 |
+| `state/ipc.json` | daemon 的端口与 token，窗口和 hook 靠它找入口 |
 
 默认值见 `src/config.js`：
 
 - `claudeExe`: `claude`（从 `PATH` 找；不在 `PATH` 就改成完整路径）
 - `defaultCwd`: `~/feishu-workspace`
 - `ipcPort`: `47831`
+- `windowExe`: 空（打包版首次运行时把 `process.execPath` 写进来；开发模式留空，退回 `node_modules/electron`）
+- `windowAutoLaunch`: `true`（窗口离线时手机建群自动拉起窗口；置 `false` 就只剩 IPC 广播，不弹任何窗口）
 
 ## 权限与安全边界
 
@@ -79,12 +92,12 @@
 
 ```
 bin/        daemon / setup / stop hook 三个入口
-app/        Electron 主进程、预加载与渲染页（选择器 / 会话窗口）
+app/        Electron 主进程（托盘 / 开机自启 / 离线拉起）、预加载与渲染页（选择器 / 会话窗口）
 src/
   agent/    launcher（信任目录、启动参数）、tools（工具调用摘要）
   feishu/   ws（长连接+去重）、events、cards、api
   session/  manager、ptySession、queue、router
-  screen.js ipc.js control.js config.js store.js projects.js paths.js secrets.js log.js
+  screen.js ipc.js control.js config.js store.js projects.js paths.js secrets.js log.js windowLaunch.js
 test/       31 个文件，含 pty 泄漏、屏幕真实解析、e2e
 scripts/    autostart（计划任务）、check-logs
 ```
@@ -92,7 +105,7 @@ scripts/    autostart（计划任务）、check-logs
 ## 开发
 
 ```bash
-npm test            # 552 个用例，离线，约 9 秒
+npm test            # 580 个用例，离线，约 9 秒
 npm run test:e2e    # 离线端到端（假 agent，不需要真 claude）
 ```
 
@@ -100,7 +113,7 @@ CI 在 `.github/workflows/test.yml`，`windows-latest` × Node 22/24。
 
 ## 已知限制
 
-1. 电脑必须开着。
+1. 电脑必须开机并已登录。装了窗口开机自启的话窗口进程不用手动开，但机器关了/睡眠了就没人接消息。
 2. 一个会话一个目录。
 3. Codex 的回复是终端画面文本，格式不如 Claude 干净。
 4. 不能接管已在 Windows Terminal 里运行的 claude 会话。
