@@ -23,6 +23,9 @@ const STATUS_TEXT = {
 
 const MAX_ALIAS_BUTTONS = 10;
 const HELP_ONLY = /^(帮助|help|\?|？)$/i;
+// 点了改名按钮两分钟没回新名字，就当没点过：否则一条迟早会来的闲聊会被当成新别名
+const PENDING_TTL_MS = 120000;
+const CANCEL_WORDS = /^(取消|算了|不改了|不用了|取消改名)$/;
 
 function parseControl(text) {
   const t = String(text || '').trim();
@@ -146,7 +149,7 @@ function panelCard({ sessions, aliases }) {
 }
 
 function createControl({ api, listSessions, closeSession, getProjects, renameAlias, getHealth, ownerOpenId, log }) {
-  const pending = new Map(); // chatId -> 待改名的旧别名
+  const pending = new Map(); // chatId -> { from: 待改名的旧别名, at: 点按钮的时间 }
 
   const send = (chatId, text) => api.sendText(chatId, text);
 
@@ -167,15 +170,22 @@ function createControl({ api, listSessions, closeSession, getProjects, renameAli
     if (!ownerOpenId || senderOpenId !== ownerOpenId) return;
     const body = String(text || '').trim();
 
-    const pendingFrom = pending.get(chatId);
-    if (pendingFrom) {
+    const p = pending.get(chatId);
+    if (p) {
       pending.delete(chatId);
-      const cmd = parseControl(body);
-      if (!HELP_ONLY.test(body) && cmd.act === 'help' && body) {
-        await doRename(chatId, pendingFrom, body);
+      if (Date.now() - p.at > PENDING_TTL_MS) {
+        // 太久了，八成早忘了这回事；这条消息照常当普通消息处理
+      } else if (CANCEL_WORDS.test(body)) {
+        await send(chatId, '已取消改名，别名没动。');
         return;
+      } else {
+        const cmd = parseControl(body);
+        if (!HELP_ONLY.test(body) && cmd.act === 'help' && body) {
+          await doRename(chatId, p.from, body);
+          return;
+        }
+        // 用户改主意发了命令，按命令继续处理
       }
-      // 用户改主意发了命令，按命令继续处理
     }
 
     const cmd = parseControl(body);
@@ -224,8 +234,8 @@ function createControl({ api, listSessions, closeSession, getProjects, renameAli
       await send(chatId, `别名「${action.from}」已经不在了，发「列表」重新看。`);
       return;
     }
-    pending.set(chatId, action.from);
-    await send(chatId, `把「${action.from}」改成什么？直接回复新名字（不带空格）。`);
+    pending.set(chatId, { from: action.from, at: Date.now() });
+    await send(chatId, `把「${action.from}」改成什么？直接回复新名字（不带空格），发「取消」就算了。`);
   }
 
   async function onBotAdded({ chatId, openId }) {

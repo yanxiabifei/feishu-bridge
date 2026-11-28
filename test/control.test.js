@@ -214,6 +214,31 @@ test('待定改名状态下发命令：按命令处理，不当成新名字', as
   assert.strictEqual(calls.at(-1)[0], 'card');
 });
 
+test('点按钮改名后迟迟不回：待定状态 2 分钟后失效，不吞掉正常消息', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const { control, calls, renames } = harness();
+  await control.onCardAction({
+    chatId: 'oc_p2p', openId: 'ou_me', action: { act: 'alias-rename', from: '卡牌' },
+  });
+  t.mock.timers.tick(121_000);
+  await control.onMessage({ chatId: 'oc_p2p', text: '晚点再说吧', senderOpenId: 'ou_me' });
+  assert.deepStrictEqual(renames, []);
+  assert.match(calls.at(-1)[2], /总控面板/);
+});
+
+test('待定改名时回「取消」：不改名，待定状态清掉', async () => {
+  const { control, calls, renames } = harness();
+  await control.onCardAction({
+    chatId: 'oc_p2p', openId: 'ou_me', action: { act: 'alias-rename', from: '卡牌' },
+  });
+  await control.onMessage({ chatId: 'oc_p2p', text: '取消', senderOpenId: 'ou_me' });
+  assert.deepStrictEqual(renames, []);
+  assert.match(calls.at(-1)[2], /已取消/);
+
+  await control.onMessage({ chatId: 'oc_p2p', text: '卡牌3', senderOpenId: 'ou_me' });
+  assert.deepStrictEqual(renames, []);
+});
+
 test('被拉进群：只对主人自我介绍，别人拉的不管', async () => {
   const { control, calls } = harness();
   await control.onBotAdded({ chatId: 'oc_g', openId: 'ou_stranger' });
