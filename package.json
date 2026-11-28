@@ -18,9 +18,10 @@
     "conpty",
     "remote-terminal"
   ],
-  "main": "bin/daemon.js",
+  "main": "app/main.js",
   "scripts": {
     "start": "node bin/daemon.js",
+    "window": "electron .",
     "setup": "node bin/setup.js",
     "autostart": "node scripts/autostart.js",
     "test": "node --test \"test/**/*.test.js\"",
