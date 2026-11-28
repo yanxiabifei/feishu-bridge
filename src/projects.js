@@ -2,11 +2,18 @@ const fs = require('node:fs');
 const { writeJsonAtomic } = require('./store');
 const { ALIAS_MAX } = require('./session/router');
 
+// 记事本 / PowerShell 5 另存的 UTF-8 会带 BOM，JSON.parse 直接报 Unexpected token；
+// config.js 与 store.js 都剥过，这里漏剥会让整张别名表静默清空
+function readJsonText(file) {
+  const text = fs.readFileSync(file, 'utf8');
+  return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
+}
+
 // 读 state/projects.json；文件不存在或 JSON 损坏都退回默认值，绝不抛错
 function loadProjects({ file, defaultCwd }) {
   let doc = {};
   try {
-    doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    doc = JSON.parse(readJsonText(file));
   } catch {
     doc = {};
   }
@@ -40,7 +47,7 @@ function renameAlias({ file, from, to }) {
 
   let doc;
   try {
-    doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    doc = JSON.parse(readJsonText(file));
   } catch {
     return { ok: false, message: '读不到 projects.json，先在电脑上跑一次 npm run setup。' };
   }

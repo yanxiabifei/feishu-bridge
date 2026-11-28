@@ -46,6 +46,30 @@ test('JSON 损坏时不抛错，退回默认值', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('带 BOM 的 projects.json 也能正常读（记事本另存为 UTF-8）', () => {
+  const dir = tmpDir();
+  const file = path.join(dir, 'projects.json');
+  fs.writeFileSync(file, `\uFEFF${JSON.stringify({ aliases: { 卡牌: 'D:/card' }, default: 'D:/w' })}`);
+  assert.deepStrictEqual(loadProjects({ file, defaultCwd: 'D:/x' }), {
+    aliases: { 卡牌: 'D:/card' },
+    default: 'D:/w',
+  });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('带 BOM 的 projects.json 也能改名，不误报「读不到」', () => {
+  const dir = tmpDir();
+  const file = path.join(dir, 'projects.json');
+  fs.writeFileSync(file, `\uFEFF${JSON.stringify({ aliases: { 卡牌: 'D:/card' } })}`);
+
+  const r = renameAlias({ file, from: '卡牌', to: '卡牌2' });
+  assert.strictEqual(r.ok, true);
+
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepStrictEqual(Object.keys(doc.aliases), ['卡牌2']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('文件里没有 default 时用传入的 defaultCwd', () => {
   const dir = tmpDir();
   const file = path.join(dir, 'projects.json');
