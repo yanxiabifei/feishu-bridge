@@ -131,3 +131,73 @@ test('client：reconnect 关闭时 daemon 断开直接落到 closed，不会卡�
   assert.strictEqual(client.state, 'closed');
   assert.ok(!states.includes('connecting') || states.lastIndexOf('closed') > states.lastIndexOf('connecting'));
 });
+
+test('client：url 传函数时每次重连重新解析，daemon 换 token / 换端口后能自己连回来', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-appclient-'));
+  const ipcFile = path.join(dir, 'ipc.json');
+  let ipc = await startIpc({
+    port: 0,
+    token: 'tok-old',
+    log,
+    ipcFile,
+    acl: () => {},
+    handlers: { onClientMessage() {} },
+  });
+  t.after(async () => {
+    try { await ipc.close(); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  let reads = 0;
+  const client = createDaemonClient({
+    WebSocketImpl: WebSocket,
+    // 模拟 main.js：每次（重）连都重新读 state/ipc.json，而不是只在启动时读一次
+    url: () => {
+      reads += 1;
+      const endpoint = JSON.parse(fs.readFileSync(ipcFile, 'utf8'));
+      return `ws://127.0.0.1:${endpoint.port}/?token=${endpoint.token}`;
+    },
+    log,
+    minBackoffMs: 20,
+    maxBackoffMs: 60,
+  });
+  t.after(() => client.close());
+
+  client.connect();
+  await waitFor(() => client.state === 'open', '没连上旧 daemon');
+
+  // daemon 重启：旧 token 作废，ipc.json 被删掉后再写新的
+  await ipc.close();
+  await waitFor(() => client.state !== 'open', '旧 daemon 关了，客户端还显示已连接');
+  ipc = await startIpc({
+    port: 0,
+    token: 'tok-new',
+    log,
+    ipcFile,
+    acl: () => {},
+    handlers: { onClientMessage() {} },
+  });
+  await waitFor(() => client.state === 'open', 'daemon 换 token 后没有自己连回来');
+  assert.ok(reads >= 2, `url 只解析了 ${reads} 次，说明还在用启动时读到的旧端点`);
+});
+
+test('client：端点文件暂时读不到时不死掉，等文件出现再连上', async (t) => {
+  const { ipc } = await boot(t);
+  let attempts = 0;
+  const client = createDaemonClient({
+    WebSocketImpl: WebSocket,
+    url: () => {
+      attempts += 1;
+      if (attempts <= 2) throw new Error('state/ipc.json 还不存在');
+      return `ws://127.0.0.1:${ipc.port}/?token=tok-app`;
+    },
+    log,
+    minBackoffMs: 20,
+    maxBackoffMs: 40,
+  });
+  t.after(() => client.close());
+
+  client.connect();
+  await waitFor(() => client.state === 'open', '文件出现后没连上');
+  assert.ok(attempts >= 3);
+});

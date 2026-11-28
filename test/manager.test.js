@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
+const path = require('node:path');
 const { createManager } = require('../src/session/manager');
 
 function fakeStore() {
@@ -48,7 +49,7 @@ function fakeApi(overrides = {}) {
 
 function setup({
   apiOverrides, fsApi, getProjects, now, projects, spawnThrows = false, ipc: ipcArg = null, configOverrides, log: logArg = null,
-  runIntake = null,
+  runIntake = null, hooksDir = null,
 } = {}) {
   const store = fakeStore();
   const { api, calls } = fakeApi(apiOverrides);
@@ -113,6 +114,7 @@ function setup({
     log,
     createPtySession,
     ipc,
+    hooksDir,
     runIntake,
     mediaRoot: 'D:/media',
     now: now || (() => new Date(2026, 10, 23, 21, 40).getTime()),
@@ -1883,4 +1885,63 @@ test('notifyDetached：活着的会话才往群里发一句，已结束的静默
   const before = calls.length;
   assert.deepStrictEqual(await manager.notifyDetached(rec.id), { ok: true });
   assert.strictEqual(calls.length, before);
+});
+
+test('会话收尾后删掉自己的 hook 文件，不在 state/hooks 里留孤儿', async () => {
+  const removed = [];
+  const { manager } = setup({
+    hooksDir: 'D:/hooks',
+    fsApi: {
+      existsSync: () => true,
+      mkdirSync() {},
+      rmSync: (file, opts) => removed.push({ file, opts }),
+    },
+  });
+  const rec = await manager.createFromPc({ cwd: 'D:/card', agent: 'claude' });
+  removed.length = 0;
+
+  await manager.closeSession(rec.id, { notify: false });
+
+  assert.deepStrictEqual(removed.map((r) => r.file), [path.join('D:/hooks', `${rec.id}.hook.json`)]);
+  assert.strictEqual(removed[0].opts.force, true);
+});
+
+test('启动恢复时收掉没有会话记录的 hook 文件，有记录的原样保留', async () => {
+  const removed = [];
+  const { manager, store } = setup({
+    hooksDir: 'D:/hooks',
+    fsApi: {
+      existsSync: () => true,
+      mkdirSync() {},
+      readdirSync: () => ['smx_live.hook.json', 'smx_orphan.hook.json', 'readme.txt'],
+      rmSync: (file) => removed.push(file),
+    },
+  });
+  store.upsert({
+    id: 'smx_live', chatId: 'oc_live', status: 'interrupted', alias: '卡牌', cwd: 'D:/card', agent: 'claude',
+  });
+
+  await manager.restoreAll();
+
+  assert.deepStrictEqual(removed, [path.join('D:/hooks', 'smx_orphan.hook.json')]);
+});
+
+test('启动恢复时，已结束的旧记录连同 hook 文件一起清掉', async () => {
+  const removed = [];
+  const { manager, store } = setup({
+    hooksDir: 'D:/hooks',
+    fsApi: {
+      existsSync: () => true,
+      mkdirSync() {},
+      readdirSync: () => [],
+      rmSync: (file) => removed.push(file),
+    },
+  });
+  store.upsert({
+    id: 'smx_closed', chatId: 'oc_closed', status: 'closed', alias: 'x', cwd: 'D:/card', agent: 'claude',
+  });
+
+  await manager.restoreAll();
+
+  assert.ok(removed.includes(path.join('D:/hooks', 'smx_closed.hook.json')), `没删：${JSON.stringify(removed)}`);
 });

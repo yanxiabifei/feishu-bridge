@@ -154,6 +154,7 @@ async function createDaemon({ deps = {} } = {}) {
     store,
     log,
     ipc,
+    hooksDir: pathsApi.HOOKS,
     getProjects: getProjectsFn,
     createPtySession: (opts) => ptySessionFactory({
       ...opts,

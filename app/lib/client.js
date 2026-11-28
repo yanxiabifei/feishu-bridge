@@ -51,7 +51,21 @@ function createDaemonClient({
   function connect() {
     if (stopped || ws) return;
     setState('connecting');
-    const socket = new WebSocketImpl(url);
+    let socket;
+    try {
+      // url 可以是函数：daemon 重启会换 token（甚至换端口），每次（重）连都重新解析，
+      // 否则会拿着启动时读到的旧 token 一直撞墙。解析失败也按断线处理，不能把进程带崩。
+      socket = new WebSocketImpl(typeof url === 'function' ? url() : url);
+    } catch (err) {
+      log.warn('client.endpoint_unavailable', { error: String((err && err.message) || err) });
+      if (!reconnect) {
+        setState('closed');
+        emit({ type: 'transport', state: 'closed', at: now() });
+        return;
+      }
+      scheduleReconnect();
+      return;
+    }
     ws = socket;
     socket.on('open', () => {
       attempts = 0;

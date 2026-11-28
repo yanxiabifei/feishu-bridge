@@ -41,7 +41,7 @@
 
 - 整个进程只开一条 WebSocket（`app/lib/client.js`），按 `sessionId` 把 `data`/`replay` 分给对应窗口；每个窗口自带一份 `sessionFeed`（`app/lib/sessionFeed.js`）做归约，窗口之间互不打扰。
 - 选择器（`app/renderer/picker.html`）负责新建会话或接回正在跑的会话；会话窗口（`session.html`）用 xterm 渲染，`input`/`resize` 原样转给 daemon。
-- 错误回包本身不带窗口身份，主进程用 `app/lib/errorRoute.js` 按 `sessionId` + `replyTo` 认领到具体窗口，认不出才广播给所有窗口。
+- 错误回包本身不带窗口身份，主进程用 `app/lib/errorRoute.js` 按 `sessionId` + `replyTo` 认领到具体窗口；认不出时只报给选择器并记一条 `bridge.unrouted_error`，不往会话窗口里塞。
 - 渲染进程 `contextIsolation: true`、`sandbox: true`，只能通过 `app/preload.js` 的窄接口和主进程说话；页面 CSP 是 `default-src 'self'`。
 - 关窗口弹二选一：结束会话（发 `close`，解散群）或只关窗口（发 `detach`，群里告知「电脑窗口已关，手机照常可发」）。
 
@@ -92,7 +92,7 @@ scripts/    autostart（计划任务）、check-logs
 ## 开发
 
 ```bash
-npm test            # 547 个用例，离线，约 9 秒
+npm test            # 552 个用例，离线，约 9 秒
 npm run test:e2e    # 离线端到端（假 agent，不需要真 claude）
 ```
 

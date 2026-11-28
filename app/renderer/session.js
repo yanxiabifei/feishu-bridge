@@ -96,6 +96,9 @@ function applyStatus(status) {
 }
 
 function handleProblem(text) {
+  // 后台已经回了明确的错误，8 秒看门狗别再把这条盖成「后台没有响应」
+  clearTimeout(restartTimer);
+  restartTimer = null;
   if (overlayEl.hidden) {
     bottomEl.dataset.state = 'closed';
     syncEl.textContent = text;

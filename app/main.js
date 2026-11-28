@@ -13,6 +13,7 @@ const { pickErrorTarget } = require('./lib/errorRoute');
 const { formatTitle, formatSyncLine } = require('./lib/format');
 
 const ACTIVE = (status) => !['closed', 'closing'].includes(status);
+const CREATE_TIMEOUT_MS = 60000;
 
 const windows = new Map();        // webContents.id → { win, kind, sessionId, feed, … }
 const sessionWindows = new Map(); // sessionId → BrowserWindow
@@ -23,6 +24,7 @@ let client = null;
 let everOpen = false;
 let endpointError = null;
 let creatingPicker = null;        // 正在等 create 回包的选择器
+let createTimer = null;           // create 等太久就报错，别让选择器一直转圈
 
 function entryOf(win) {
   return win && !win.isDestroyed() ? windows.get(win.webContents.id) : null;
@@ -83,10 +85,10 @@ function pushSessionMeta(entry) {
 }
 
 function createClient() {
-  let endpoint;
+  let file;
   try {
-    const file = locateEndpointFile({ appPath: app.getAppPath() });
-    endpoint = readEndpoint({ file });
+    file = locateEndpointFile({ appPath: app.getAppPath() });
+    readEndpoint({ file }); // 启动时先读一次：读不到就明确报错，别让界面一直转圈
     endpointError = null;
   } catch (err) {
     endpointError = String((err && err.message) || err);
@@ -95,7 +97,9 @@ function createClient() {
   }
   client = createDaemonClient({
     WebSocketImpl: WebSocket,
-    url: buildWsUrl(endpoint),
+    // daemon 每次重启都会换 token（甚至换端口），端点必须每次（重）连时重读；
+    // 启动时读一次就记住，会在 daemon 重启后拿着废 token 一直撞墙。
+    url: () => buildWsUrl(readEndpoint({ file })),
     log: console,
     onTransportChange: onTransportChange,
   });
@@ -183,7 +187,9 @@ function openSessionWindow(sessionId) {
     awaiting: null,      // 等哪个请求的回包：create / attach / restart
     closingPrompt: false,
     destroying: false,   // 程序主动销毁，close 事件直接放行
-    ending: false,
+    ending: false,       // 已经报过「会话已结束」，3 秒后自毁
+    endingTimer: null,
+    destroyAfterPrompt: false, // 自毁时间到了但确认框还开着，等框关掉再销毁
   };
   const id = win.webContents.id;
   windows.set(id, entry);
@@ -239,17 +245,53 @@ async function onSessionClose(entry, event) {
     response = indexOf('cancel');
   }
   entry.closingPrompt = false;
+  if (entry.win.isDestroyed()) return;
+
+  // 确认框开着的时候会话自己结束了（群被解散），3 秒自毁计时器把它挂在了这里：
+  // 现在框没了，直接销毁，不用再问一次。
+  if (entry.destroyAfterPrompt) {
+    entry.destroyAfterPrompt = false;
+    entry.destroying = true;
+    entry.win.destroy();
+    return;
+  }
 
   const picked = choice.buttons[response] || { id: 'cancel' };
-  if (picked.id === 'cancel' || entry.win.isDestroyed()) return;
+  if (picked.id === 'cancel') return;
+  const sent = send({ type: picked.id === 'close' ? 'close' : 'detach', sessionId: entry.sessionId });
+  if (!sent) {
+    // 断线时窗口先关掉，daemon 永远收不到「结束会话」，用户却以为群已经解散。
+    // 留在原地报错，等连上再关一次。
+    sendEffect(entry, { type: 'error', message: '后台连接已断开，这次关闭没有生效，请稍后再试。' });
+    return;
+  }
   entry.destroying = true;
-  send({ type: picked.id === 'close' ? 'close' : 'detach', sessionId: entry.sessionId });
   entry.win.destroy();
 }
 
 function closePicker(entry) {
   if (!entry || entry.win.isDestroyed()) return;
   entry.win.close();
+}
+
+function clearCreateWait() {
+  if (!createTimer) return;
+  clearTimeout(createTimer);
+  createTimer = null;
+}
+
+// create 是个来回：daemon 不吭声时选择器会一直转圈，看门狗到点就报错。
+function startCreateWait(entry) {
+  clearCreateWait();
+  createTimer = setTimeout(() => {
+    createTimer = null;
+    if (creatingPicker !== entry || entry.win.isDestroyed()) return;
+    creatingPicker = null;
+    entry.awaiting = null;
+    entry.error = '后台 60 秒没有回应，建会话可能卡住了。看看终端里 npm start 的输出。';
+    pushPicker(entry);
+  }, CREATE_TIMEOUT_MS);
+  if (createTimer.unref) createTimer.unref();
 }
 
 function onSessionMessage(session) {
@@ -264,6 +306,7 @@ function onSessionMessage(session) {
     if (creatingPicker) {
       closePicker(creatingPicker);
       creatingPicker = null;
+      clearCreateWait();
     }
   }
 
@@ -271,16 +314,29 @@ function onSessionMessage(session) {
   if (!entry) return;
   for (const effect of entry.feed.handle({ type: 'session', session })) sendEffect(entry, effect);
   pushSessionMeta(entry);
-  if (!ACTIVE(session.status) && !entry.ending) {
-    entry.ending = true;
-    sendEffect(entry, { type: 'ended' });
-    if (!entry.closingPrompt) {
-      setTimeout(() => {
-        if (!entry.win.isDestroyed()) {
-          entry.destroying = true;
-          entry.win.destroy();
+  if (!ACTIVE(session.status)) {
+    if (!entry.ending) {
+      entry.ending = true;
+      sendEffect(entry, { type: 'ended' });
+      entry.endingTimer = setTimeout(() => {
+        entry.endingTimer = null;
+        if (entry.win.isDestroyed() || !entry.ending) return;
+        // 用户正开着「关闭窗口」确认框，别在底下偷偷销毁；等框关掉再说
+        if (entry.closingPrompt) {
+          entry.destroyAfterPrompt = true;
+          return;
         }
+        entry.destroying = true;
+        entry.win.destroy();
       }, 3000);
+    }
+  } else if (entry.ending) {
+    // 会话又活了（中断后重来成功）：撤掉结束倒计时，否则窗口 3 秒后照旧自毁
+    entry.ending = false;
+    entry.destroyAfterPrompt = false;
+    if (entry.endingTimer) {
+      clearTimeout(entry.endingTimer);
+      entry.endingTimer = null;
     }
   }
 }
@@ -299,7 +355,10 @@ function routeError(msg) {
   if (target) {
     target.awaiting = null;
     if (target.kind === 'picker') {
-      if (creatingPicker === target) creatingPicker = null;
+      if (creatingPicker === target) {
+        creatingPicker = null;
+        clearCreateWait();
+      }
       target.error = text;
       pushPicker(target);
     } else {
@@ -307,14 +366,13 @@ function routeError(msg) {
     }
     return;
   }
+  // 分不清是谁的错时只在选择器上报：往每个会话窗口里塞一条不相干的红字更糟。
   for (const entry of windows.values()) {
-    if (entry.kind === 'picker') {
-      entry.error = text;
-      pushPicker(entry);
-    } else {
-      sendEffect(entry, { type: 'error', message: text });
-    }
+    if (entry.kind !== 'picker') continue;
+    entry.error = text;
+    pushPicker(entry);
   }
+  console.warn('bridge.unrouted_error', text);
 }
 
 function onDaemonMessage(msg) {
@@ -381,7 +439,10 @@ function openPicker() {
   });
   win.on('closed', () => {
     windows.delete(id);
-    if (creatingPicker === entry) creatingPicker = null;
+    if (creatingPicker === entry) {
+      creatingPicker = null;
+      clearCreateWait();
+    }
   });
   return win;
 }
@@ -438,6 +499,8 @@ ipcMain.on('bridge:picker', (event, item) => {
       entry.error = endpointError || (client ? '后台守护进程尚未连接' : '先运行 npm start 启动后台守护进程');
       creatingPicker = null;
       pushPicker(entry);
+    } else {
+      startCreateWait(entry);
     }
   }
 });
@@ -468,7 +531,16 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (app.isReady()) openPicker();
+    if (!app.isReady()) return;
+    // 再点一次图标不该开出第二个选择器，把已经开着的那个拉到前面即可
+    const picker = [...windows.values()].find((e) => e.kind === 'picker' && !e.win.isDestroyed());
+    if (picker) {
+      if (picker.win.isMinimized()) picker.win.restore();
+      picker.win.show();
+      picker.win.focus();
+      return;
+    }
+    openPicker();
   });
   app.whenReady().then(() => openPicker());
   // Windows 上关掉所有窗口就是退出；没有托盘常驻的语义

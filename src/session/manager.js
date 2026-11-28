@@ -36,6 +36,7 @@ function createManager({
   getProjects = null,
   mediaRoot = paths.MEDIA,
   runIntake = null,
+  hooksDir = null,
 }) {
   const sessions = new Map();
   const booting = new Map();        // chatId -> 无头接待期间收到的后续消息，建好会话后补投
@@ -81,6 +82,41 @@ function createManager({
     } catch (err) {
       log.warn('落盘失败', { sessionId: id, message: errMessage(err) });
     }
+    removeHookFile(id);
+  }
+
+  // 会话没了，它的 --settings hook 文件也没人会用；不删会在 state/hooks 里越积越多。
+  function removeHookFile(sessionId) {
+    if (!hooksDir || !sessionId) return;
+    try {
+      fsApi.rmSync(path.join(hooksDir, `${sessionId}.hook.json`), { force: true });
+    } catch (err) {
+      log.warn('清理 hook 文件失败', { sessionId, message: errMessage(err) });
+    }
+  }
+
+  // 启动时收掉上一代进程留下的孤儿 hook 文件（老版本从没删过）。
+  function sweepHookFiles() {
+    if (!hooksDir) return;
+    let names;
+    try {
+      names = fsApi.readdirSync(hooksDir);
+    } catch (err) {
+      if (!err || err.code !== 'ENOENT') log.warn('清理 hook 目录失败', { message: errMessage(err) });
+      return;
+    }
+    const live = new Set(store.all().map((r) => `${r.id}.hook.json`));
+    let removed = 0;
+    for (const name of names) {
+      if (!name.endsWith('.hook.json') || live.has(name)) continue;
+      try {
+        fsApi.rmSync(path.join(hooksDir, name), { force: true });
+        removed += 1;
+      } catch (err) {
+        log.warn('清理 hook 文件失败', { file: name, message: errMessage(err) });
+      }
+    }
+    if (removed) log.info(`清理了 ${removed} 个孤儿 hook 文件`);
   }
 
   // 等到队列真正稳定：任务执行过程中可能又追加新任务，不能只 await 一次快照
@@ -333,6 +369,8 @@ function createManager({
       return null;
     }
 
+    log.info('session.created', { sessionId: record.id, chatId, agent: record.agent, cwd: record.cwd });
+
     // 首条必须在任何 await 之前入队：否则连发两条时第二条会抢先拿到 seq，
     // 且卡片发送失败会让函数 reject、首条提示词永远写不进去。
     if (plan.prompt) sessions.get(record.id).submitText(plan.prompt, 'phone');
@@ -372,6 +410,7 @@ function createManager({
       }
       throw new Error(`会话启动失败：${message}`);
     }
+    log.info('session.created', { sessionId: record.id, chatId, agent: record.agent, cwd: record.cwd });
     await api.sendText(chatId, '会话已创建，可以从手机说话了。');
     return record;
   }
@@ -638,6 +677,8 @@ function createManager({
         // 落盘失败最多让重启后多恢复一条已结束的记录，不能把会话已关闭这件事回滚成异常
         log.warn('落盘失败', { sessionId, message: errMessage(err) });
       }
+      removeHookFile(sessionId);
+      log.info('session.destroyed', { sessionId, reason });
     }
   }
 
@@ -747,6 +788,7 @@ function createManager({
         } catch (err) {
           log.warn('清理旧记录失败', { sessionId: record.id, message: String((err && err.message) || err) });
         }
+        removeHookFile(record.id);
         continue;
       }
       record.status = 'interrupted';
@@ -767,6 +809,7 @@ function createManager({
     } catch (err) {
       log.warn('重启状态落盘失败', { message: String((err && err.message) || err) });
     }
+    sweepHookFiles();
     return restored;
   }
 
