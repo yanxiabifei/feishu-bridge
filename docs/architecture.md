@@ -81,7 +81,7 @@ scripts/    autostart（计划任务）、check-logs
 ## 开发
 
 ```bash
-npm test            # 526 个用例，离线，约 9 秒
+npm test            # 527 个用例，离线，约 9 秒
 npm run test:e2e    # 离线端到端（假 agent，不需要真 claude）
 ```
 

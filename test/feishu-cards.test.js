@@ -17,6 +17,16 @@ test('truncate：超限时保留头尾并标注截断', () => {
   assert.ok(r.text.startsWith('AAAA'));
 });
 
+test('truncate：截断点落在 emoji 中间时不劈开代理对', () => {
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  // 头部截断点（8000 - 1500）正好落在一个 😀 的两个代理项之间
+  const headCase = 'A'.repeat(6499) + '😀' + 'B'.repeat(2000);
+  assert.ok(!lone.test(cards.truncate(headCase, 8000).text), '头部不应留下孤立代理项');
+  // 尾部起点正好落在一个 😀 的两个代理项之间
+  const tailCase = 'A'.repeat(7001) + '😀' + 'B'.repeat(1499);
+  assert.ok(!lone.test(cards.truncate(tailCase, 8000).text), '尾部不应留下孤立代理项');
+});
+
 test('转义后再截断：满是 < 的长回复也不超长度上限', () => {
   // 每个 < 转义成 &#60; 会翻 5 倍；先截断再转义，8000 字上限就形同虚设
   const c = cards.replyCard({ text: '<'.repeat(9000) });

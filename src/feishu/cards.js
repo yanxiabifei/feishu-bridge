@@ -1,13 +1,21 @@
 const MAX_CARD_CHARS = 8000;
 const TAIL_CHARS = 1500;
 
+const isHighSurrogate = (code) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code) => code >= 0xdc00 && code <= 0xdfff;
+
 function truncate(text, limit = MAX_CARD_CHARS) {
   const value = String(text ?? '');
   if (value.length <= limit) return { text: value, truncated: false };
   const tailLen = Math.min(TAIL_CHARS, Math.max(0, limit));
-  const head = value.slice(0, Math.max(0, limit - tailLen));
-  const tail = tailLen > 0 ? value.slice(-tailLen) : '';
-  const omitted = Math.max(0, value.length - limit);
+  let headEnd = Math.max(0, limit - tailLen);
+  let tailStart = value.length - tailLen;
+  // 截断点落在代理对中间会留下孤立代理项，卡片里显示成乱码
+  if (headEnd > 0 && isHighSurrogate(value.charCodeAt(headEnd - 1))) headEnd -= 1;
+  if (tailLen > 0 && isLowSurrogate(value.charCodeAt(tailStart))) tailStart += 1;
+  const head = value.slice(0, headEnd);
+  const tail = tailLen > 0 ? value.slice(tailStart) : '';
+  const omitted = Math.max(0, tailStart - headEnd);
   return {
     text: `${head}\n\n…（已截断 ${omitted} 字，完整内容请到电脑上看）\n\n${tail}`,
     truncated: true,
