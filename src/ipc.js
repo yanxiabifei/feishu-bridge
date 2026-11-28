@@ -137,6 +137,10 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
   // wss 会把底层 server 的 'error' 再转发射一次；没有监听者就是 uncaughtException。
   wss.on('error', (err) => warnIpcError(log, 'ipc.ws_error', err));
   wss.on('connection', (ws, req) => {
+    // 必须在鉴权之前挂：close 之后、return 之前这段窗口里客户端仍可能灌畸形帧，
+    // ws 会在连接对象上 emit('error')，没有监听者就是 uncaughtException，整个 daemon 陪葬。
+    // 未鉴权的连接恰恰是最容易触发这条路径的（任何本地进程/网页都够得着）。
+    ws.on('error', (err) => warnIpcError(log, 'ipc.ws_client_error', err));
     let url;
     try {
       url = new URL(req.url, 'http://127.0.0.1');
@@ -150,9 +154,6 @@ function startIpc({ port = 0, token, handlers = {}, log, ipcFile, acl = restrict
     }
     clients.add(ws);
     ws.isAlive = true;
-    // 畸形帧（无效 UTF-8、超大帧）会让 ws 在连接对象上 emit('error')，
-    // 没有监听者时 EventEmitter 直接抛成 uncaughtException，整个 daemon 陪葬
-    ws.on('error', (err) => warnIpcError(log, 'ipc.ws_client_error', err));
     ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', (raw) => {
       let msg;

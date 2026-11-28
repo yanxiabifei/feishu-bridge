@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const net = require('node:net');
+const crypto = require('node:crypto');
 const WebSocket = require('ws');
 const { startIpc } = require('../src/ipc');
 const { createLogger } = require('../src/log');
@@ -623,6 +624,51 @@ test('WebSocket：超大帧被关闭，守护进程继续服务', async (t) => {
     ws.send('x'.repeat(2 * 1024 * 1024));
   });
   assert.strictEqual(code, 1009);
+  const res = await fetch(`http://127.0.0.1:${ipc.port}/health`);
+  assert.strictEqual(res.status, 200);
+});
+
+// ws 客户端自己会校验帧，发不出畸形帧；用裸 socket 完成握手后再灌一个未掩码超大帧
+function rawWsOversizedFrame(port, token) {
+  return new Promise((resolve) => {
+    const key = crypto.randomBytes(16).toString('base64');
+    const sock = net.connect(port, '127.0.0.1', () => {
+      sock.write(
+        `GET /?token=${token} HTTP/1.1\r\n`
+        + 'Host: 127.0.0.1\r\n'
+        + 'Upgrade: websocket\r\n'
+        + 'Connection: Upgrade\r\n'
+        + `Sec-WebSocket-Key: ${key}\r\n`
+        + 'Sec-WebSocket-Version: 13\r\n\r\n',
+      );
+    });
+    let buf = '';
+    let sent = false;
+    const done = () => { sock.destroy(); resolve(); };
+    sock.on('data', (d) => {
+      buf += d.toString('latin1');
+      if (!sent && buf.includes('101')) {
+        sent = true;
+        const payload = Buffer.alloc(2 * 1024 * 1024, 0x78);
+        const head = Buffer.alloc(10);
+        head[0] = 0x81;                 // 文本帧，未掩码
+        head[1] = 0xFF;                 // 64 位长度
+        head.writeUInt32BE(payload.length, 6);
+        sock.write(Buffer.concat([head, payload]));
+      }
+    });
+    sock.on('error', done);
+    sock.on('close', done);
+    setTimeout(done, 500);
+  });
+}
+
+test('WebSocket：未鉴权的连接发超大帧也不能把守护进程带崩', async (t) => {
+  const { ipc } = await boot();
+  t.after(() => ipc.close());
+  // token 不对时服务端先 close 再 return；close 还没完成时灌一个超大帧，
+  // 服务端会在连接对象上 emit('error')——鉴权分支没有监听器就是 uncaughtException
+  await rawWsOversizedFrame(ipc.port, 'wrong');
   const res = await fetch(`http://127.0.0.1:${ipc.port}/health`);
   assert.strictEqual(res.status, 200);
 });
