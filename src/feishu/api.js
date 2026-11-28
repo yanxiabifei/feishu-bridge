@@ -110,7 +110,9 @@ function createApi({
       if (!(err instanceof FeishuError) || !TOKEN_INVALID.has(err.code)) throw err;
       token = null;
       tokenExp = 0;
-      inflight = null;
+      // 不碰 inflight：同时失效的多条请求如果各自清空它，会各自再发一次取 token，
+      // 并发一上去就是一串重复请求（飞书这个接口有频率限制）。正在飞的那次拿到的
+      // 本来就是新 token，等它就行。inflight 置空由 getToken 自己收尾。
       return fn();
     }
   }

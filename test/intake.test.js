@@ -72,6 +72,17 @@ test('接待给的目录在候选里且存在：采纳并带回别名', async ()
   assert.strictEqual(r.alias, '其他');
 });
 
+test('接待给的目录大小写/斜杠不同也按候选表归一，并存成配置里的写法', async () => {
+  const r = await run({
+    text: '帮我看看其他项目',
+    runIntake: async () => ({
+      cwd: 'd:\\Other', groupName: '其他项目', prompt: '看看其他项目', note: '',
+    }),
+  });
+  assert.strictEqual(r.cwd, 'D:/other');
+  assert.strictEqual(r.alias, '其他');
+});
+
 test('群名去换行、超长截断到 20 字、空串回退', async () => {
   const nl = await run({
     runIntake: async () => ({ groupName: '卡牌\n技能', prompt: '干活' }),

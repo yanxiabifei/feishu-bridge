@@ -116,14 +116,16 @@ function runIntakeCli({ prompt, timeoutMs = 20000, cwd, exe = 'claude', env = pr
 
 function applyDecision(base, out, { aliases, exists }) {
   if (!out || typeof out !== 'object' || Array.isArray(out)) return base;
-  const allowed = new Set(Object.values(aliases).map(normPath));
+  // 归一后的路径映射回配置里的写法：模型可能把 D:/other 写成 d:\Other，
+  // 直接存原样的话，后面按字符串比对 cwd 的地方（exists、项目表、卡片）就对不上。
+  const allowed = new Map(Object.values(aliases).map((p) => [normPath(p), p]));
 
   const res = { ...base, decidedBy: 'intake' };
   if (!base.forcedCwd) {
-    const cand = String(out.cwd || '');
-    if (cand && allowed.has(normPath(cand)) && exists(cand)) {
-      res.cwd = cand;
-      res.alias = aliasOf(cand, aliases);
+    const canon = allowed.get(normPath(out.cwd));
+    if (canon && exists(canon)) {
+      res.cwd = canon;
+      res.alias = aliasOf(canon, aliases);
     }
   }
   res.groupName = cleanName(out.groupName);

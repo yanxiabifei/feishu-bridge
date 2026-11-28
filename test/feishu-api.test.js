@@ -421,6 +421,46 @@ test('token 被判无效（99991663）时清缓存重取一次，请求自动恢
   assert.strictEqual(bizCalls, 2);
 });
 
+test('并发遇到 token 失效只重取一次，不因清空 inflight 再发起一次取 token', async () => {
+  let releaseRefresh;
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  let tokenCalls = 0;
+  let bizCalls = 0;
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes('/auth/v3/tenant_access_token/internal')) {
+      tokenCalls += 1;
+      // 刷新出来的取 token 请求先卡住，好让两条重试路径都走到 getToken 再断言
+      if (tokenCalls > 1) await refreshGate;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 0, msg: 'ok', tenant_access_token: `t-${tokenCalls}`, expire: 7200 }),
+        text: async () => '',
+        arrayBuffer: async () => Buffer.from(''),
+      };
+    }
+    bizCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => (bizCalls <= 2
+        ? { code: 99991663, msg: 'invalid access token' }
+        : { code: 0, msg: 'ok', data: { message_id: 'om_ok' } }),
+      text: async () => '',
+      arrayBuffer: async () => Buffer.from(''),
+    };
+  };
+  const api = createApi({ appId: 'cli_x', appSecret: 'sec', fetchImpl, now: () => 1_000_000 });
+
+  const pending = [api.sendText('oc_1', 'a'), api.sendText('oc_1', 'b')];
+  await new Promise((resolve) => setImmediate(resolve));
+  // 两个失效回应都在刷新期间到达：应共用同一个刷新请求，而不是各起一个
+  assert.strictEqual(tokenCalls, 2);
+  releaseRefresh();
+  assert.deepStrictEqual(await Promise.all(pending), ['om_ok', 'om_ok']);
+});
+
 test('token 类错误只重试一次，仍然失败就抛出', async () => {
   const api = apiWithRoutes((url) => (
     url.includes('tenant_access_token')
