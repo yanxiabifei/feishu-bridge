@@ -392,14 +392,14 @@ function createManager({
     return store.all().find((s) => s.claudeSessionId === claudeSessionId) || null;
   }
 
-  // 提前结束本轮（只回车、无输出）时也要把「处理中」卡片就地定稿，不能留一张永远转圈的卡
-  async function finalizePendingCard(record, text) {
+  // 提前结束本轮（只回车、无输出、进程崩溃）时也要把「处理中」卡片就地定稿，
+  // 不能留一张永远转圈的卡。不传 card 就用回复卡；崩溃这类场景传错误卡，标题才不会被标成 ✅。
+  async function finalizePendingCard(record, text, card) {
     const pending = record.pendingCard;
     if (!pending || !pending.cardId) return;
     record.pendingCard = null;
     try {
-      const card = cards.replyCard({ text, agent: record.agent, cwd: record.cwd });
-      await api.updateCardEntity(pending.cardId, card, pending.seq + 1);
+      await api.updateCardEntity(pending.cardId, card || cards.replyCard({ text, agent: record.agent, cwd: record.cwd }), pending.seq + 1);
     } catch (err) {
       log.warn('处理中卡片收尾失败', {
         cardId: pending.cardId, chatId: record.chatId, message: String((err && err.message) || err),
@@ -485,11 +485,15 @@ function createManager({
 
   async function notifyCrash(record, e) {
     const code = typeof e.code === 'number' ? `（code ${e.code}）` : '';
+    const text = `会话进程异常退出${code}。\n\n回复「重来」，我用 --resume 接着干。`;
+    // 本轮那张「处理中」卡还在转圈：就地定稿成错误卡，别再额外发一张，
+    // 否则群里永远挂着一条看起来还在跑的消息。
+    if (record.pendingCard && record.pendingCard.cardId) {
+      await finalizePendingCard(record, '', cards.errorCard({ title: '进程异常退出', text }));
+      return;
+    }
     try {
-      await api.sendCard(record.chatId, cards.errorCard({
-        title: '进程异常退出',
-        text: `会话进程异常退出${code}。\n\n回复「重来」，我用 --resume 接着干。`,
-      }));
+      await api.sendCard(record.chatId, cards.errorCard({ title: '进程异常退出', text }));
     } catch (err) {
       log.warn('崩溃通知发送失败', { chatId: record.chatId, message: String((err && err.message) || err) });
     }

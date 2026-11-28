@@ -1446,3 +1446,22 @@ test('Stop：会话表落盘失败也不耽误定稿，不会再多发一张重�
   assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, sentBefore, '不能重复发一张卡');
   assert.ok(log.warns.some(([m]) => m === '落盘失败'));
 });
+
+test('PTY 崩溃：本轮「处理中」卡片就地定稿成错误卡，不留一张永远转圈的', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个长的' });
+  await manager._drain();
+  const pending = rec.pendingCard;
+  assert.ok(pending, '先有一张处理中卡片');
+  const sentBefore = calls.filter((c) => c[0] === 'sendCard').length;
+
+  spawned[0].emit({ type: 'exit', code: 3 });
+  await manager._drain();
+
+  const upd = calls.filter((c) => c[0] === 'updateCardEntity' && c[1] === pending.cardId).at(-1);
+  assert.ok(upd, '处理中的卡必须被就地定稿');
+  assert.ok(upd[3].header.title.content.includes('异常退出'), '标题是错误卡，不能标成 ✅ 回复');
+  assert.ok(JSON.stringify(upd).includes('code 3'));
+  assert.strictEqual(rec.pendingCard, null);
+  assert.strictEqual(calls.filter((c) => c[0] === 'sendCard').length, sentBefore, '不能另发一张错误卡');
+});
