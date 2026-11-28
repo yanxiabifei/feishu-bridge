@@ -41,6 +41,7 @@ function createManager({
   const booting = new Map();        // chatId -> 无头接待期间收到的后续消息，建好会话后补投
   let shuttingDown = false;
   const forcePending = new Map();   // chatId -> { text }：被护栏拦下、等「仍然发送」的那句
+  const turnInputs = new Map();     // sessionId -> 本轮真正发起的那条输入（lastInput 可能被中途覆盖）
   const TOOL_SUMMARY_MAX_BYTES = 20 * 1024 * 1024;
   let pendingWork = Promise.resolve();
 
@@ -93,6 +94,10 @@ function createManager({
     else if (e.type === 'turn-end' && record.status === 'running') record.status = 'idle';
     else if (e.type === 'exit' && record.status !== 'closing' && !shuttingDown) record.status = 'error';
     if (e.type === 'input' || e.type === 'pc-input') record.lastInput = e.input || null;
+    // 一轮的「发起输入」以 turn-start / pc-input 为准：排队中的下一条或者中途在电脑上
+    // 敲的字都会改写 lastInput，拿它给本轮定稿会把回复挂到错误的提问上。
+    if (e.type === 'turn-start') turnInputs.set(record.id, { seq: e.seq, origin: e.origin, text: e.text });
+    if (e.type === 'pc-input') turnInputs.set(record.id, e.input || null);
 
     if (e.type === 'data') {
       if (ipc && ipc.broadcast) {
@@ -122,6 +127,12 @@ function createManager({
       else enqueueWork(() => notifyCrash(record, e));
     }
     if (e.type === 'turn-end') enqueueWork(() => pushScreenOutput(record));
+    if (e.type === 'turn-end' && e.guard === 'idle') {
+      // 看门狗兜底：Stop 一直不来，处理中卡片就地收尾，别让它永远转圈。
+      // 自增轮次号让仍在飞行中的建卡任务失效，否则它会在收尾之后再发一张废卡。
+      record.turnSeq = (record.turnSeq || 0) + 1;
+      enqueueWork(() => finalizePendingCard(record, '没等到结束信号，按画面判断这一轮已经回到输入框。'));
+    }
     if (e.type === 'error') log.warn('会话出错', { sessionId: e.sessionId, message: e.message });
     if (e.type === 'overflow') log.warn('队列已满', { sessionId: e.sessionId });
   }
@@ -134,7 +145,15 @@ function createManager({
       now,
     });
     sessions.set(record.id, ps);
-    ps.start();
+    try {
+      ps.start();
+    } catch (err) {
+      // 起不来就把半成品从表里摘掉：否则后续消息会写进一个没有 PTY 的会话，
+      // 永远等不到 ready，手机那边只会看到消息石沉大海。
+      sessions.delete(record.id);
+      record.status = 'error';
+      throw err;
+    }
     return ps;
   }
 
@@ -390,7 +409,7 @@ function createManager({
     store.save();
     ipc?.broadcast({ type: 'session', session: record });
 
-    const input = record.lastInput;
+    const input = turnInputs.get(record.id) || record.lastInput;
     if (input && !String(input.text || '').trim()) {   // 只按了回车，不推
       await finalizePendingCard(record, '本轮只按了回车，没有别的输入。');
       return;
@@ -454,7 +473,7 @@ function createManager({
       log.warn('取画面失败', { sessionId: record.id, message: String((err && err.message) || err) });
       return;
     }
-    const input = record.lastInput;
+    const input = turnInputs.get(record.id) || record.lastInput;
     const fromPc = input && input.origin === 'pc' && String(input.text || '').trim();
     const lead = fromPc
       ? `🖥 你刚在电脑上问：${String(input.text).replace(/\s+/g, ' ').slice(0, 80)}`
@@ -474,6 +493,7 @@ function createManager({
 
     const ps = sessions.get(sessionId);
     sessions.delete(sessionId);
+    turnInputs.delete(sessionId);
     record.status = 'closing';        // 先置 closing，kill 出来的 exit 事件不会被当成崩溃
     store.save();
     if (ps) {
@@ -525,7 +545,30 @@ function createManager({
     record.lastActiveAt = new Date(now()).toISOString();
     record.resuming = record.agent === 'claude' && Boolean(record.claudeSessionId);
     store.save();
-    spawn(record);
+    try {
+      spawn(record);
+    } catch (err) {
+      // 目录校验过了也可能起不来（exe 被占、权限、Node 版本）：状态落成 error，
+      // 别留个半个 starting 让「重来」以外的话都写进空气。
+      record.resuming = false;
+      record.status = 'error';
+      try {
+        store.save();
+      } catch (e) {
+        log.warn('重启失败落盘失败', { sessionId: record.id, message: errMessage(e) });
+      }
+      ipc?.broadcast({ type: 'session', session: record });
+      log.error('会话重启失败', { sessionId: record.id, message: errMessage(err) });
+      try {
+        await api.sendCard(record.chatId, cards.errorCard({
+          title: '会话起不来',
+          text: `重启失败：${errMessage(err)}`,
+        }));
+      } catch (e) {
+        log.warn('重启失败提示发送失败', { chatId: record.chatId, message: errMessage(e) });
+      }
+      return false;
+    }
     ipc?.broadcast({ type: 'session', session: record });
 
     await api.sendText(record.chatId, record.resuming ? '重新开起来了，接着上次的对话。' : '重新开起来了。');
@@ -670,6 +713,7 @@ function createManager({
   async function retryWithoutResume(record) {
     // 排队期间会话可能已被解散/移除，记录不在了就别再拉起新 PTY
     if (store.get(record.id) !== record) return;
+    if (['closed', 'closing'].includes(record.status)) return;
     record.resuming = false;
     record.claudeSessionId = null;
     record.transcriptPath = null;
@@ -680,7 +724,23 @@ function createManager({
       log.warn('重建状态落盘失败', { sessionId: record.id, message: String((err && err.message) || err) });
     }
     // 先拉起新 PTY 再发提示：await 期间若用户发消息，必须写进新 PTY 而不是已退出的旧 PTY
-    spawn(record);
+    try {
+      spawn(record);
+    } catch (err) {
+      record.status = 'error';
+      try {
+        store.save();
+      } catch (e) {
+        log.warn('重建状态落盘失败', { sessionId: record.id, message: errMessage(e) });
+      }
+      log.error('重建会话失败', { sessionId: record.id, message: errMessage(err) });
+      try {
+        await api.sendText(record.chatId, `重建会话失败：${errMessage(err)}。回复「重来」再试。`);
+      } catch (e) {
+        log.warn('重建失败提示发送失败', { chatId: record.chatId, message: errMessage(e) });
+      }
+      return;
+    }
     ipc?.broadcast({ type: 'session', session: record });
     try {
       await api.sendText(record.chatId, '上次的对话记录不在了，改用新会话重建。');

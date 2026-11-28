@@ -63,7 +63,9 @@ function setup({
       submitted: [],
       confirm: false,
       start() {
-        if (spawnThrows) throw new Error('pty 启动失败');
+        // spawnThrows 可以是布尔值，也可以是「第几次 spawn 该失败」的判定函数
+        const throwNow = typeof spawnThrows === 'function' ? spawnThrows(spawned.length - 1) : spawnThrows;
+        if (throwNow) throw new Error('pty 启动失败');
         ps.started = true;
       },
       submitText(text, origin, opts) {
@@ -615,7 +617,8 @@ test('Stop：最后输入为空时收尾处理中卡片并落盘', async () => {
   assert.ok(rec.pendingCard && rec.pendingCard.cardId === 'card_1');
 
   const savesBefore = store.saveCalls;
-  spawned[0].emit({ type: 'input', input: { seq: 2, origin: 'phone', text: '   ', at: 2 } });
+  // 空回车只可能来自电脑端（手机端空白消息在 onPhoneMessage 就被丢掉了）
+  spawned[0].emit({ type: 'pc-input', input: { seq: 2, origin: 'pc', text: '   ', at: 2 } });
   await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '好的' } });
 
   assert.strictEqual(rec.pendingCard, null);
@@ -911,8 +914,8 @@ test('codex turn-end：把最近画面推回群里，电脑来源带 🖥 引言
   const rec = await h.manager.createFromPhone({ chatId: 'oc_1', chatName: '卡牌', text: '卡牌 codex 写个快排' });
   const ps = h.spawned[0];
   ps.emit({ type: 'ready' });
-  ps.emit({ type: 'pc-input', input: { seq: 2, origin: 'pc', text: '帮我写快排', at: 2 } });
   ps.emit({ type: 'turn-start', text: '帮我写快排' });
+  ps.emit({ type: 'pc-input', input: { seq: 2, origin: 'pc', text: '帮我写快排', at: 2 } });
   ps.screenText = 'def quicksort():\n    pass';
   ps.emit({ type: 'turn-end' });
   await h.manager._drain();
@@ -1180,4 +1183,65 @@ test('规则 path-missing：发错误卡，不调无头', async () => {
   assert.strictEqual(spawned.length, 0);
   const card = calls.find((c) => c[0] === 'sendCard')[2];
   assert.ok(JSON.stringify(card).includes('目录不存在'));
+});
+
+test('revive：spawn 抛错 → 返回 false、状态落成 error、不留半成品 PTY', async () => {
+  // 第 0 次正常建会话，之后的重启一律失败
+  const { manager, store, calls, rec } = await started({ spawnThrows: (i) => i > 0 });
+  manager._sessions.clear();            // 模拟 daemon 重启：内存里的 PTY 全没了
+  await manager.restoreAll();
+
+  const ok = await manager.revive(store.get(rec.id));
+
+  assert.strictEqual(ok, false);
+  assert.strictEqual(store.get(rec.id).status, 'error');
+  assert.strictEqual(manager._sessions.size, 0);
+  const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  assert.ok(JSON.stringify(card).includes('会话起不来'));
+});
+
+test('--resume 失败后的降级重建也失败：状态 error、提示重来、不留半成品', async () => {
+  // 0=首次建会话，1=--resume 重开，2=降级重建 —— 让第 2 次失败
+  const { manager, store, calls, spawned, rec } = await started({ spawnThrows: (i) => i === 2 });
+  rec.claudeSessionId = 'cs_1';
+  store.save();
+  manager._sessions.clear();            // 模拟 daemon 重启：内存里的 PTY 全没了
+  await manager.restoreAll();
+  await manager.onPhoneMessage({ chatId: 'oc_1', text: '继续', senderOpenId: 'ou_me' });
+
+  spawned[1].emit({ type: 'exit', code: 1 });
+  await manager._drain();
+
+  assert.strictEqual(store.get(rec.id).status, 'error');
+  assert.strictEqual(manager._sessions.size, 0);
+  assert.ok(calls.some((c) => c[0] === 'sendText' && c[2].includes('重建会话失败')));
+});
+
+test('turn-end 带 guard:idle：处理中卡片就地收尾，不让它永远转圈', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'phone', text: '跑个测试' });
+  await manager._drain();
+  assert.ok(rec.pendingCard, '先有一张处理中卡片');
+
+  spawned[0].emit({ type: 'turn-end', guard: 'idle' });
+  await manager._drain();
+
+  assert.strictEqual(rec.pendingCard, null);
+  const upd = calls.filter((c) => c[0] === 'updateCardEntity').at(-1);
+  assert.ok(JSON.stringify(upd).includes('没等到结束信号'));
+});
+
+test('Stop：中途从手机发的消息不会顶掉电脑那条提问', async () => {
+  const { manager, calls, spawned, rec } = await started();
+  spawned[0].emit({ type: 'turn-start', seq: 1, origin: 'pc', text: '改下登录页' });
+  spawned[0].emit({ type: 'pc-input', input: { seq: 1, origin: 'pc', text: '改下登录页', at: 1 } });
+  // 手机又发了一条：input 事件在排队时就当场改写 lastInput
+  spawned[0].emit({ type: 'input', input: { seq: 2, origin: 'phone', text: '顺便看日志', at: 2 } });
+
+  await manager.onHookStop({ sessionId: rec.id, payload: { last_assistant_message: '改好了。' } });
+
+  const card = calls.filter((c) => c[0] === 'sendCard').at(-1)[2];
+  const body = JSON.stringify(card.body);
+  assert.ok(body.includes('🖥 你刚在电脑上问：改下登录页'));
+  assert.ok(!body.includes('顺便看日志'));
 });

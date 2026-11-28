@@ -3,6 +3,10 @@ const DEFAULT_ROWS = 30;
 const READY_POLL_MS = 200;
 const CODEX_MIN_TURN_MS = 1500;   // 刚写进去的这段不判结束
 const CODEX_SETTLE_POLLS = 3;     // 静默稳定连续 3 次探测（200ms × 3）
+// 电脑回车也可能不产生回合（空回车、/clear、弹窗上回车），Claude 没有 Stop hook 兜底，
+// 没有这条看门狗会话会永远卡在 running，手机消息再也写不进去。
+// 三轮多完全无输出、画面回到输入框，就按「回合已结束」处理。
+const IDLE_GUARD_MS = 180000;
 
 // 宿主自己跑在 Claude Code 里时（从终端里 `npm start` 就是这种情况），环境会带一串
 // 会话标记；传给子 claude 会让它认为自己是子会话，打出「Transcript saving is off」，
@@ -39,6 +43,7 @@ function createPtySession({
   let screenDisposed = false;
   let runningSince = 0;
   let settlePolls = 0;
+  let lastActivityAt = 0;   // 最后一次有 PTY 输出或写入的时间，看门狗用
 
   const screen = screenFactory({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
   const emit = (e) => onEvent({ sessionId: session.id, ...e });
@@ -75,6 +80,7 @@ function createPtySession({
       throw err;
     }
     runningSince = now();
+    lastActivityAt = runningSince;
     settlePolls = 0;
     emit({ type: 'turn-start', seq: item.seq, origin: item.origin, text: item.text });
   }
@@ -109,6 +115,14 @@ function createPtySession({
         emit({ type: 'turn-end' });
         releaseTurn();
       }
+      return;
+    }
+    // Claude 的看门狗：回车后根本没起回合时 Stop 不会来，靠「长时间无输出 + 回到输入框」自愈
+    if (status === 'running'
+        && now() - lastActivityAt >= IDLE_GUARD_MS
+        && screen.isReady() && screen.inInputBox()) {
+      emit({ type: 'turn-end', guard: 'idle' });
+      releaseTurn();
     }
   }
 
@@ -144,6 +158,7 @@ function createPtySession({
     });
     pty.onData((d) => {
       if (disposed) return;
+      lastActivityAt = now();
       screen.write(d);
       emit({ type: 'data', data: d });
     });
@@ -184,6 +199,7 @@ function createPtySession({
       status = 'running';
       session.status = 'running';
       runningSince = now();
+      lastActivityAt = runningSince;
       settlePolls = 0;
       emit({ type: 'pc-input', input: session.lastInput });
     }

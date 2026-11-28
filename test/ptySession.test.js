@@ -733,3 +733,55 @@ test('resize：合法尺寸转发给屏幕与 PTY，非法尺寸忽略', () => {
   assert.deepStrictEqual(h.resized, [[100, 30]]);
   assert.deepStrictEqual(h.screenResized, [[100, 30]]);
 });
+
+test('Claude 看门狗：长时间无输出且回到输入框，按回合已结束自愈并放出队列', () => {
+  const h = harness({ agent: 'claude' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('你好', 'phone');
+  h.ps.submitText('第二条', 'phone');
+  assert.strictEqual(h.ps.status, 'running');
+  assert.strictEqual(h.written.length, 1, '第二条应当先排队');
+
+  // 中途有输出 → 计时重来
+  h.setNow(100000);
+  h.emitData('还在干活');
+  h.setNow(200000);
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0, '有输出后不到三分钟不能判结束');
+
+  // 三分钟无输出、画面回到输入框 → 自愈
+  h.setNow(100000 + 180000);
+  h.ps._pollReady();
+  const ends = h.events.filter((e) => e.type === 'turn-end');
+  assert.strictEqual(ends.length, 1);
+  assert.strictEqual(ends[0].guard, 'idle');
+  assert.strictEqual(h.ps.status, 'running', '释放后队列立刻写入下一条，又回到 running');
+  assert.strictEqual(h.written.length, 2, '排队的消息应当被写进去');
+});
+
+test('Claude 看门狗：画面停在弹窗/菜单时不误判', () => {
+  const h = harness({ agent: 'claude' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('你好', 'phone');
+
+  h.setInBox(false);
+  h.setNow(500000);
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0);
+  assert.strictEqual(h.ps.status, 'running');
+});
+
+test('电脑回车（没起回合）也会刷新看门狗计时', () => {
+  const h = harness({ agent: 'claude' });
+  h.ps.start(); h.ps._pollReady();
+  h.setNow(5000);
+  h.ps.submitText('你好', 'phone');
+
+  h.setNow(100000);
+  h.ps.onPcKeys('\r');
+  h.setNow(100000 + 179000);
+  h.ps._pollReady();
+  assert.strictEqual(h.events.filter((e) => e.type === 'turn-end').length, 0);
+});
